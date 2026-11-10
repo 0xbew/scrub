@@ -1,0 +1,4 @@
+/bin/
+harness/out/
+__pycache__/
+*.pyc

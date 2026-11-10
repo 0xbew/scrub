@@ -1,0 +1,8 @@
+scrub
+Copyright 2026 0xbew
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+tokens.json is generated from the gitleaks rule catalogue, v8.30.1 (MIT License,
+Copyright (c) 2019 Zachary Rice); the full upstream notice is in tokens.json under
+source.notice.
