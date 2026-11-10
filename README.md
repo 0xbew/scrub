@@ -57,7 +57,7 @@ These are the rules it is built and measured against.
 8. A denylist that is configured but missing, unreadable or invalid is an error, and one invalid entry
    rejects the whole list; the CLI then answers no request. Output still changing after a bounded number
    of re-reads is cut rather than sent.
-9. The audit's checks are separate code from the scrubber's detectors (its safety net, `audit_net.go`), so one
+9. The audit's checks are separate code from the scrubber's detectors (its safety net, `internal/auditnet`, which imports nothing from the detectors), so one
    bug in a detector does not also blind the audit. See "Known gap" for what it cannot see.
 
 ## Known gap
@@ -165,5 +165,5 @@ under "Known gap".
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). `tokens.json` is generated from the
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). `internal/tokens/tokens.json` is generated from the
 [gitleaks](https://github.com/gitleaks/gitleaks) rule catalogue (MIT).

@@ -13,6 +13,24 @@ Go's `regexp` is RE2 (no lookarounds), so a port is impossible, and it would car
 stapling over. Here each root rule is written once, as Go code, and the quoting,
 escaping and encoding are handled once, by the readings.
 
+## Layout
+
+The module root holds the public API only (`Scrub`, `ScrubDiff`, `Redact`, `Audit`, `AuditBody`,
+`AuditValue`, the denylist and the classifiers); everything behind it is under `internal/`:
+
+| package | holds |
+|---|---|
+| `internal/lex` | the lexer's extents, character classes, placeholders, diff rows |
+| `internal/reading` | readings and their offset maps |
+| `internal/vocab` | the classifiers |
+| `internal/tokens` | vendor token formats (`tokens.json`) |
+| `internal/span`, `internal/gate` | hidden spans; the gate build's detector switches |
+| `internal/denylist` | the compiled identity and vendor list |
+| `internal/detect` | the detectors, one file per family, and their registry |
+| `internal/audit` | the pre-send audit |
+| `internal/auditnet` | the audit's safety net; it imports nothing from `internal/detect` (rule 9) |
+| `internal/engine` | the pipeline: readings, detectors, render, re-read, cut, diffs |
+
 ## Pipeline
 
 ```
@@ -20,7 +38,7 @@ text -> cut to limit+margin -> readings -> detectors -> hidden spans (source off
      -> union -> render once -> cut to limit
 ```
 
-### 1. Readings (`reading.go`)
+### 1. Readings (`internal/reading`)
 
 A reading is a decoded view of the source with an offset map: every byte of the reading
 knows the source span it came from. The scrubber and the audit read the same set, the
@@ -56,7 +74,7 @@ span, and that source span is hidden. So one JSON-field rule covers `"k": "v"`,
 each. Mapping back can only widen what is hidden (an escape's backslash goes with its
 character), never narrow it.
 
-### 2. The lexer (`lex.go`)
+### 2. The lexer (`internal/lex`)
 
 One set of extent functions, used by every detector, so "where a value ends" is decided
 in one place:
@@ -77,14 +95,18 @@ in one place:
   already hidden, so the detectors never re-read their own output. Idempotence
   (`Scrub(Scrub(x)) == Scrub(x)`) follows from this; there is no fixed-point loop.
 
-### 3. The root rules as Go types (`detect.go`, `vocab.go`)
+### 3. The root rules as Go types (`internal/detect`, `internal/vocab`)
 
 ```go
 type Kind uint8              // what a hidden span becomes: secret, long, jwt, email, phone, owner, teammate, person, vendor
 type Span struct{ Lo, Hi int; Kind Kind }
 
-type detector func(r *reading, out *spans)
+type Detector struct{ Name string; run func(*Scan) } // detect.Secrets, detect.Runs: the order they run in
 ```
+
+The detectors run in one order, listed once (`internal/detect/registry.go`): each entry is a
+root rule's name and its function, and the name is the switch the gate's build turns it off by
+(`internal/gate`).
 
 The classifiers are ported as functions, unchanged in meaning:
 `IsCredentialName` (the word-set vocabulary), `LooksSecret` / `wordlike`,
@@ -99,7 +121,7 @@ Detectors (each one root rule):
 | R3 headers and schemes | header names (`authorization`, `cookie`, `x-api-key`, any credential name after `-H`) and auth schemes (`Bearer x`) | to the quote that closes the header, else the word (scheme + word; cookie pairs) |
 | R4 SQL | `PASSWORD 'x'`, `IDENTIFIED BY x` | the SQL literal or word |
 | R5 URL userinfo | `scheme://user:PASS@` | to the `@` |
-| R6 token formats | the gitleaks-derived prefix table (`tokens.json`) and JWT, also with written escapes blanked and with a one-letter option attached before it (`-d` then the token) blanked | the format |
+| R6 token formats | the gitleaks-derived prefix table (`internal/tokens/tokens.json`) and JWT, also with written escapes blanked and with a one-letter option attached before it (`-d` then the token) blanked | the format |
 | R7 long run | 32+ token characters holding a letter and a digit | the run, kept when a path or an identifier written as code |
 | R8 shapes and denylist | email, phone (NANP, international), identities, vendors | the match |
 
@@ -136,7 +158,7 @@ A generic name never shields a credential: every separator in the text is examin
 its own, so `key=PASSWORD=x` and `{cache_key: a,password: x}` find the inner credential
 without any "read on inside the value" machinery.
 
-### 4. Render once (`render.go`)
+### 4. Render once (`internal/engine`)
 
 Spans from every reading and detector are unioned in source offsets. Each maximal run
 becomes one placeholder (`<redacted>`, `<long-token>`, `<redacted-jwt>`, `[email]`,
@@ -167,7 +189,7 @@ its line is the statement too) and past an unclosed literal whose body is alread
 placeholder (its quote was paired wrongly; the statement's later literals are read on their
 own).
 
-### 5. Diffs (`diff.go`)
+### 5. Diffs (`internal/engine/diff.go`)
 
 One diff reader: hunk headers give each hunk's row counts; each side is assembled as
 its file holds it (markers stripped) with an offset map and scrubbed as a reading;
@@ -175,7 +197,7 @@ spans map back onto the rows, and every row keeps its marker and line ending. Te
 outside hunks, and a diff that breaks its own counts, is read every way at once (as
 plain text, with continuations past one marker, and as sides), and the union is hidden.
 
-### 6. The audit (`audit.go`)
+### 6. The audit (`internal/audit`, `internal/auditnet`)
 
 `Audit(text, denylist) []string` returns rule ids, never text. It reads every reading
 of §1 (raw, each unescape level, percent-decoded and then unescaped; JSON values are

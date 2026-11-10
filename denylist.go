@@ -1,21 +1,13 @@
 package scrub
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
-	"regexp"
-	"strings"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/0xbew/scrub/internal/denylist"
 )
 
 // Roles an identity is replaced by.
 var Roles = []string{"owner", "teammate", "person"}
-
-const minVendorChars = 3
 
 // DenylistError: the denylist cannot be used. The message never quotes an entry or a path.
 type DenylistError struct{ msg string }
@@ -25,267 +17,46 @@ func (e *DenylistError) Error() string { return e.msg }
 // ErrDenylistMissing: there is no local copy.
 var ErrDenylistMissing = &DenylistError{"no local denylist"}
 
-type identity struct {
-	rule    string
-	rx      *regexp.Regexp
-	literal bool
-	kind    Kind
-}
-
-type vendor struct {
-	rule string
-	rx   *regexp.Regexp
-}
-
 // Denylist is a compiled identity and vendor list, applied whole or refused whole.
 type Denylist struct {
-	Version    int
-	identities []identity
-	vendors    []vendor
+	Version  int
+	compiled *denylist.List
 }
 
 // NoDenylist: the shapes and secrets only, for a sender that has decided it may send
 // without the identity list. Explicit, so nobody reaches it by passing nil.
 var NoDenylist = &Denylist{}
 
-func roleKind(role string) Kind {
-	switch role {
-	case "owner":
-		return KindOwner
-	case "teammate":
-		return KindTeammate
+// list: the compiled list the internals read. nil stays nil (no denylist: nothing is sent); a
+// Denylist with no compiled list, as NoDenylist, is an empty one.
+func (d *Denylist) list() *denylist.List {
+	if d == nil {
+		return nil
 	}
-	return KindPerson
+	if d.compiled == nil {
+		return denylist.None
+	}
+	return d.compiled
 }
 
-func literalPattern(text string) string {
-	parts := strings.Fields(text)
-	for i, p := range parts {
-		parts[i] = regexp.QuoteMeta(p)
-	}
-	return `(?i)` + strings.Join(parts, `[\s\p{Z}\x{85}._-]*`)
-}
-
-func usable(rx *regexp.Regexp, literal bool, where string) error {
-	if matchesWithBoundary(rx, "", literal) {
-		return &DenylistError{where + " matches empty text, so it would match everywhere"}
-	}
-	for _, p := range placeholderWords {
-		if matchesWithBoundary(rx, p, literal) {
-			return &DenylistError{fmt.Sprintf("%s matches the placeholder %s, so every scrubbed record would be refused", where, p)}
+func wrap(l *denylist.List, err error) (*Denylist, error) {
+	if err != nil {
+		if err == denylist.ErrMissing {
+			return nil, ErrDenylistMissing
 		}
-	}
-	return nil
-}
-
-func matchesWithBoundary(rx *regexp.Regexp, s string, literal bool) bool {
-	found := false
-	identityMatches(rx, s, literal, func(lo, hi int) { found = true })
-	return found
-}
-
-// alnumBefore / alnumAfter: a letter or digit in any script (`_` is a boundary).
-func alnumBefore(s string, i int) bool {
-	if i <= 0 {
-		return false
-	}
-	r, _ := utf8.DecodeLastRuneInString(s[:i])
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsNumber(r) || unicode.Is(unicode.Mn, r)
-}
-
-func alnumAfter(s string, i int) bool {
-	if i >= len(s) {
-		return false
-	}
-	r, _ := utf8.DecodeRuneInString(s[i:])
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsNumber(r) || unicode.Is(unicode.Mn, r)
-}
-
-// identityMatches: every match; a literal only with no letter or digit on either side.
-func identityMatches(rx *regexp.Regexp, s string, literal bool, emit func(lo, hi int)) {
-	if off("denylist") {
-		return
-	}
-	if !literal {
-		if s == "" {
-			if rx.MatchString("") {
-				emit(0, 0)
-			}
-			return
+		var e *denylist.Error
+		if errors.As(err, &e) {
+			return nil, &DenylistError{e.Error()}
 		}
-		for _, m := range rx.FindAllStringIndex(s, -1) {
-			if m[1] > m[0] {
-				emit(m[0], m[1])
-			}
-		}
-		return
+		return nil, err
 	}
-	at := 0
-	for at <= len(s) {
-		m := rx.FindStringIndex(s[at:])
-		if m == nil {
-			return
-		}
-		lo, hi := at+m[0], at+m[1]
-		if hi > lo && !alnumBefore(s, lo) && !alnumAfter(s, hi) {
-			emit(lo, hi)
-			at = hi
-			continue
-		}
-		// Retry one rune later: a shorter or later match may stand.
-		_, sz := utf8.DecodeRuneInString(s[lo:])
-		if sz == 0 {
-			sz = 1
-		}
-		at = lo + sz
-	}
+	return &Denylist{Version: l.Version, compiled: l}, nil
 }
 
 // ParseDenylist: the secret's payload (JSON) and its version, or a DenylistError.
 func ParseDenylist(payload []byte, version int) (*Denylist, error) {
-	if version < 1 {
-		return nil, &DenylistError{"the version must be a whole number of 1 or more"}
-	}
-	var data map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &data); err != nil {
-		return nil, &DenylistError{"the denylist must be an object with identities and vendors"}
-	}
-	return parseFields(data, version)
-}
-
-func parseFields(data map[string]json.RawMessage, version int) (*Denylist, error) {
-	unknown := 0
-	for k := range data {
-		if k != "identities" && k != "vendors" {
-			unknown++
-		}
-	}
-	if unknown > 0 {
-		return nil, &DenylistError{fmt.Sprintf("%d unknown key(s): only identities and vendors are allowed", unknown)}
-	}
-	var ids []json.RawMessage
-	var vendors []json.RawMessage
-	if json.Unmarshal(data["identities"], &ids) != nil || json.Unmarshal(data["vendors"], &vendors) != nil ||
-		data["identities"] == nil || data["vendors"] == nil || bytes.Equal(bytes.TrimSpace(data["identities"]), []byte("null")) ||
-		bytes.Equal(bytes.TrimSpace(data["vendors"]), []byte("null")) {
-		return nil, &DenylistError{"identities and vendors must both be lists"}
-	}
-	if len(ids) == 0 {
-		return nil, &DenylistError{"no identities: a denylist that names nobody scrubs nobody"}
-	}
-	d := &Denylist{Version: version}
-	for i, raw := range ids {
-		where := fmt.Sprintf("identities[%d]", i)
-		var entry map[string]json.RawMessage
-		if json.Unmarshal(raw, &entry) != nil || entry == nil {
-			return nil, &DenylistError{where + " must be an object"}
-		}
-		extra := 0
-		for k := range entry {
-			if k != "literal" && k != "regex" && k != "role" {
-				extra++
-			}
-		}
-		if extra > 0 {
-			return nil, &DenylistError{fmt.Sprintf("%s has %d unknown key(s): only literal, regex and role are allowed", where, extra)}
-		}
-		_, hasLit := entry["literal"]
-		_, hasRx := entry["regex"]
-		if hasLit == hasRx {
-			return nil, &DenylistError{where + " needs exactly one of literal or regex"}
-		}
-		var role string
-		if json.Unmarshal(entry["role"], &role) != nil || !(role == "owner" || role == "teammate" || role == "person") {
-			return nil, &DenylistError{where + " role must be one of owner, teammate, person"}
-		}
-		kind := "literal"
-		if hasRx {
-			kind = "regex"
-		}
-		var value string
-		if json.Unmarshal(entry[kind], &value) != nil || strings.TrimSpace(value) == "" {
-			return nil, &DenylistError{fmt.Sprintf("%s %s is empty or not text", where, kind)}
-		}
-		var rx *regexp.Regexp
-		if kind == "literal" {
-			rx = regexp.MustCompile(literalPattern(value))
-		} else {
-			var err error
-			rx, err = regexp.Compile(`(?i)` + value)
-			if err != nil {
-				// Never the pattern: the compiler's message can quote it.
-				return nil, &DenylistError{where + " regex does not compile"}
-			}
-		}
-		if err := usable(rx, kind == "literal", where); err != nil {
-			return nil, err
-		}
-		d.identities = append(d.identities, identity{fmt.Sprintf("identity[%d]:%s", i, role), rx, kind == "literal", roleKind(role)})
-	}
-	for j, raw := range vendors {
-		where := fmt.Sprintf("vendors[%d]", j)
-		var name string
-		if json.Unmarshal(raw, &name) != nil || runeLen(strings.TrimSpace(name)) < minVendorChars {
-			return nil, &DenylistError{fmt.Sprintf("%s must be text of at least %d characters", where, minVendorChars)}
-		}
-		rx := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(strings.TrimSpace(name)))
-		if err := usable(rx, false, where); err != nil {
-			return nil, err
-		}
-		d.vendors = append(d.vendors, vendor{fmt.Sprintf("vendor[%d]", j), rx})
-	}
-	return d, nil
+	return wrap(denylist.Parse(payload, version))
 }
 
 // LoadDenylist reads the local copy: the secret's payload plus its `version`.
-func LoadDenylist(path string) (*Denylist, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrDenylistMissing
-		}
-		return nil, &DenylistError{"the local denylist is unreadable: OSError"}
-	}
-	var data map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &data); err != nil {
-		var anyv any
-		if json.Unmarshal(raw, &anyv) == nil {
-			return nil, &DenylistError{"the local denylist is not a JSON object"}
-		}
-		return nil, &DenylistError{"the local denylist is unreadable: JSONDecodeError"}
-	}
-	if data == nil {
-		return nil, &DenylistError{"the local denylist is not a JSON object"}
-	}
-	version := 0
-	// A number, never a string that holds one: `"1"` is a list written wrong, and a wrong list is refused whole.
-	if v, ok := data["version"]; ok && !bytes.HasPrefix(bytes.TrimSpace(v), []byte(`"`)) {
-		var n json.Number
-		dec := json.NewDecoder(bytes.NewReader(v))
-		dec.UseNumber()
-		if dec.Decode(&n) == nil {
-			if iv, err := n.Int64(); err == nil && !strings.ContainsAny(n.String(), ".eE") {
-				version = int(iv)
-			}
-		}
-		delete(data, "version")
-	}
-	if version < 1 {
-		return nil, &DenylistError{"the version must be a whole number of 1 or more"}
-	}
-	return parseFields(data, version)
-}
-
-func (d *Denylist) apply(s string, out *spanSet) {
-	if d == nil || off("denylist") {
-		return
-	}
-	for _, id := range d.identities {
-		identityMatches(id.rx, s, id.literal, func(lo, hi int) { out.add(lo, hi, id.kind) })
-	}
-	for _, v := range d.vendors {
-		for _, m := range v.rx.FindAllStringIndex(s, -1) {
-			out.add(m[0], m[1], KindVendor)
-		}
-	}
-}
+func LoadDenylist(path string) (*Denylist, error) { return wrap(denylist.Load(path)) }

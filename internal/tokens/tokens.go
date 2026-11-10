@@ -1,4 +1,4 @@
-package scrub
+package tokens
 
 import (
 	_ "embed"
@@ -7,13 +7,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/0xbew/scrub/internal/gate"
+	"github.com/0xbew/scrub/internal/lex"
 )
 
 // Vendor token formats: a fixed prefix and the body after it, wherever they stand. The table
 // is generated from gitleaks' catalogue (tokens.json), plus the rows its `local` map names and explains.
 
 //go:embed tokens.json
-var tokensJSON []byte
+var TokensJSON []byte
 
 type tokenFormat struct {
 	rule string
@@ -21,7 +24,7 @@ type tokenFormat struct {
 	rx   *regexp.Regexp
 }
 
-type tokenSegment struct {
+type TokenSegment struct {
 	Text       *string `json:"text"`
 	IgnoreCase bool    `json:"ignore_case"`
 	Chars      *string `json:"chars"`
@@ -31,7 +34,7 @@ type tokenSegment struct {
 
 var (
 	tokenFormats  []tokenFormat
-	identPrefixes []string
+	IdentPrefixes []string
 )
 
 const contRx = `(?:\\\r?\n)*`
@@ -40,7 +43,7 @@ func charClass(chars string) string {
 	var b strings.Builder
 	b.WriteByte('[')
 	for _, c := range chars {
-		if c < 128 && isAlnumASCII(byte(c)) {
+		if c < 128 && lex.IsAlnumASCII(byte(c)) {
 			b.WriteRune(c)
 		} else {
 			b.WriteByte('\\')
@@ -55,10 +58,10 @@ func init() {
 	var table struct {
 		Formats []struct {
 			ID       string         `json:"id"`
-			Segments []tokenSegment `json:"segments"`
+			Segments []TokenSegment `json:"segments"`
 		} `json:"formats"`
 	}
-	if err := json.Unmarshal(tokensJSON, &table); err != nil {
+	if err := json.Unmarshal(TokensJSON, &table); err != nil {
 		panic("scrub: tokens.json is unreadable: " + err.Error())
 	}
 	prefixes := map[string]bool{}
@@ -118,9 +121,9 @@ func init() {
 		}
 	}
 	for p := range prefixes {
-		identPrefixes = append(identPrefixes, p)
+		IdentPrefixes = append(IdentPrefixes, p)
 	}
-	sort.Strings(identPrefixes)
+	sort.Strings(IdentPrefixes)
 }
 
 // gluedFormat: a format distinctive enough to read even glued to a word before it (`prod_AKIA…`, `x_sk_live_…`,
@@ -130,7 +133,7 @@ func init() {
 // prefix from reading as a token.
 var gluedVendors = map[string]bool{"xoxb-": true, "xoxp-": true, "sk_live_": true, "rk_live_": true, "glpat-": true}
 
-func gluedFormat(segs []tokenSegment) bool {
+func gluedFormat(segs []TokenSegment) bool {
 	p := segs[0].Text
 	if p == nil || segs[0].IgnoreCase || strings.ContainsAny(*p, "./~=") {
 		return false
@@ -150,7 +153,7 @@ func gluedFormat(segs []tokenSegment) bool {
 	}
 	switch {
 	case len(t) >= 5 && strings.ContainsAny(t, "_-"):
-	case len(t) == 4 && isUpperASCII(t[0]) && isUpperASCII(t[1]):
+	case len(t) == 4 && lex.IsUpperASCII(t[0]) && lex.IsUpperASCII(t[1]):
 	default:
 		return false
 	}
@@ -190,11 +193,11 @@ func blankShortOptions(s string) string {
 	return string(b)
 }
 
-func tokenSpans(s string, emit func(lo, hi int)) {
-	if off("tokens") {
+func TokenSpans(s string, emit func(lo, hi int)) {
+	if gate.Off(gate.Tokens) {
 		return
 	}
-	lowered := asciiLower(s)
+	lowered := lex.AsciiLower(s)
 	readings := []string{s}
 	if b := blankEscapes(s); b != s {
 		readings = append(readings, b)
@@ -214,8 +217,8 @@ func tokenSpans(s string, emit func(lo, hi int)) {
 	}
 }
 
-func hasToken(s string) bool {
+func HasToken(s string) bool {
 	found := false
-	tokenSpans(s, func(lo, hi int) { found = true })
+	TokenSpans(s, func(lo, hi int) { found = true })
 	return found
 }

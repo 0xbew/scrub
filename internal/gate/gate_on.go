@@ -1,6 +1,6 @@
 //go:build scrubgate
 
-package scrub
+package gate
 
 import (
 	"os"
@@ -21,4 +21,4 @@ var gateOff = func() map[string]bool {
 	return m
 }()
 
-func off(name string) bool { return gateOff[name] }
+func Off(name string) bool { return gateOff[name] }
