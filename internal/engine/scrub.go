@@ -3,6 +3,8 @@ package engine
 import (
 	"unicode/utf8"
 
+	"github.com/0xbew/scrub/internal/audit"
+
 	"github.com/0xbew/scrub/internal/denylist"
 	"github.com/0xbew/scrub/internal/detect"
 	"github.com/0xbew/scrub/internal/reading"
@@ -57,6 +59,11 @@ func detectText(window string, d *denylist.List, m mode) *span.Set {
 // denylist's identities and vendors removed. With no denylist (nil, as a failed LoadDenylist
 // leaves it) nothing is sent: the output is the cut marker alone. NoDenylist scrubs without one.
 func Scrub(text string, d *denylist.List, limit int) string {
+	limit = clampLimit(limit)
+	return fit(scrub(text, d, limit), limit)
+}
+
+func scrub(text string, d *denylist.List, limit int) string {
 	if d == nil {
 		return Cut
 	}
@@ -71,12 +78,34 @@ func Scrub(text string, d *denylist.List, limit int) string {
 
 // Redact returns at most limit runes of text with secrets removed (no shapes, no denylist).
 func Redact(text string, limit int) string {
+	limit = clampLimit(limit)
+	return fit(redact(text, limit), limit)
+}
+
+func redact(text string, limit int) string {
 	return settled(text, func(t string) (string, bool) {
 		window := firstRunes(t, limit+RedactMargin)
 		out := renderFixed(window, detectText(window, denylist.None, modeRedact), false, func(t string) *span.Set { return detectText(t, denylist.None, modeRedact) })
 		res := cut(out, limit, utf8.RuneCountInString(t))
 		return res, res != out
 	})
+}
+
+// maxLimit keeps limit+RedactMargin from overflowing an int, and keeps the text a cut output is
+// re-audited on (up to limit runes) inside what the audit reads.
+const maxLimit = audit.MaxBytes / utf8.UTFMax
+
+// clampLimit: a negative limit sends nothing, and a huge one is the largest the margin allows.
+func clampLimit(limit int) int {
+	return min(max(limit, 0), maxLimit)
+}
+
+// fit: the cut marker is itself longer than a limit below its length, and the limit is a promise: send nothing.
+func fit(out string, limit int) string {
+	if out == Cut && limit < utf8.RuneCountInString(Cut) {
+		return ""
+	}
+	return out
 }
 
 // settled: one scrub, and a cut output scrubbed once more. The cut takes away text the first reading paired with

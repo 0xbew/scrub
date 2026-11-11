@@ -151,6 +151,9 @@ func Parse(payload []byte, version int) (*List, error) {
 	if err := json.Unmarshal(payload, &data); err != nil {
 		return nil, &Error{"the denylist must be an object with identities and vendors"}
 	}
+	if payloadVer, present := takeVersion(data); present && payloadVer != version {
+		return nil, &Error{"the payload's version is not the version given"}
+	}
 	return parseFields(data, version)
 }
 
@@ -238,6 +241,32 @@ func parseFields(data map[string]json.RawMessage, version int) (*List, error) {
 	return d, nil
 }
 
+// takeVersion removes the payload's `version` key and returns it: 0 when it is not a whole
+// number. A number, never a string that holds one: `"1"` is a list written wrong, and a wrong
+// list is refused whole.
+func takeVersion(data map[string]json.RawMessage) (version int, present bool) {
+	v, ok := data["version"]
+	if !ok {
+		return 0, false
+	}
+	if bytes.HasPrefix(bytes.TrimSpace(v), []byte(`"`)) {
+		// Left in place, so the unknown key refuses the list too.
+		return 0, true
+	}
+	delete(data, "version")
+	var n json.Number
+	dec := json.NewDecoder(bytes.NewReader(v))
+	dec.UseNumber()
+	if dec.Decode(&n) != nil {
+		return 0, true
+	}
+	iv, err := n.Int64()
+	if err != nil || strings.ContainsAny(n.String(), ".eE") {
+		return 0, true
+	}
+	return int(iv), true
+}
+
 // Load reads the local copy: the secret's payload plus its `version`.
 func Load(path string) (*List, error) {
 	raw, err := os.ReadFile(path)
@@ -258,19 +287,7 @@ func Load(path string) (*List, error) {
 	if data == nil {
 		return nil, &Error{"the local denylist is not a JSON object"}
 	}
-	version := 0
-	// A number, never a string that holds one: `"1"` is a list written wrong, and a wrong list is refused whole.
-	if v, ok := data["version"]; ok && !bytes.HasPrefix(bytes.TrimSpace(v), []byte(`"`)) {
-		var n json.Number
-		dec := json.NewDecoder(bytes.NewReader(v))
-		dec.UseNumber()
-		if dec.Decode(&n) == nil {
-			if iv, err := n.Int64(); err == nil && !strings.ContainsAny(n.String(), ".eE") {
-				version = int(iv)
-			}
-		}
-		delete(data, "version")
-	}
+	version, _ := takeVersion(data)
 	if version < 1 {
 		return nil, &Error{"the version must be a whole number of 1 or more"}
 	}

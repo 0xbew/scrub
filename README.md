@@ -111,9 +111,9 @@ as gitleaks for that. It does not make sending safe on its own; send only what p
 | `Scrub(text, d, limit) string` | secrets, addresses, phones and the denylist's names removed; at most `limit` runes |
 | `ScrubDiff(text, d, limit) string` | `Scrub` for a unified diff: each hunk side read as its file holds it, every row kept |
 | `Redact(text, limit) string` | secrets only (no addresses, phones or names) |
-| `Audit(text, d) []Hit` | rule ids that fire anywhere in `text`; empty means it may be sent |
+| `Audit(text, d) []Hit` | rule ids that fire anywhere in `text`; empty means it may be sent; text over `MaxAuditBytes` (8 MiB) is `unreadable` |
 | `AuditBody(body, d) []Hit` | `Audit` over a JSON document or JSON lines, as the receiver decodes them; undecodable is `unreadable` |
-| `AuditValue(v, d) []Hit` | `Audit` over every string (keys included) in a decoded JSON value |
+| `AuditValue(v, d) []Hit` | `Audit` over every string (keys included) in a JSON value; other Go types are read as their JSON encoding, and one with none is `unreadable` |
 | `LoadDenylist(path)` / `ParseDenylist(payload, version)` | the denylist, or a `*DenylistError` whose message never quotes an entry or a path |
 | `NoDenylist` | an explicit choice to scrub without a denylist (secrets and shapes only); a nil denylist sends nothing |
 
@@ -133,7 +133,10 @@ A JSON object with a whole-number `version` of 1 or more, `identities` and `vend
 ```
 
 `role` is `owner`, `teammate` or `person`, and names the placeholder. A literal matches case-insensitively,
-with any run of spaces, `.`, `_` or `-` (or none) between its words, and never inside a longer word. Unknown keys, an empty
+with any run of spaces, `.`, `_` or `-` (or none) between its words, and never inside a longer word; a vendor
+is matched anywhere, inside longer words too (`Box` also hides the middle of `sandbox`), because a vendor name glued into an
+identifier is still the name. `ParseDenylist` accepts the `version` key if
+it equals the version argument. Unknown keys, an empty
 list of identities, a regex that does not compile, a pattern that matches empty text or a placeholder, and
 a vendor shorter than three characters are all errors.
 
@@ -144,9 +147,15 @@ go install github.com/0xbew/scrub/cmd/scrub@latest
 scrub [--denylist PATH] < requests.jsonl
 ```
 
+`go install` puts `scrub` in `$(go env GOPATH)/bin` (`~/go/bin` by default, or `$GOBIN` if set), which a fresh machine
+does not have on its `PATH`: add it, or run that path directly. A program that imports the library
+needs no separate install.
+
 One JSON request per line, `{"op": "scrub"|"scrub_diff"|"redact"|"audit_text"|"audit_body", "text": "...", "limit": 4000}`,
-and one answer per line: `{"out": "..."}` or `{"hits": [...]}`. A denylist that cannot be used is a single
-line `{"denylist_error": "..."}`, and no request is answered.
+and one answer per line: `{"out": "..."}` or `{"hits": [...]}`. A line that is not JSON or names an unknown op
+is answered with an `"error"` key plus `"out": "…[cut]"` and `"hits": ["unreadable"]`, so it cannot be read as a clean
+answer. A denylist that cannot be used is a single line `{"denylist_error": "..."}` (with the same refusal fields),
+no request is answered, and the exit status is 1, as it is when reading requests or writing answers fails.
 
 ## How it is checked
 

@@ -1,12 +1,18 @@
 package scrub
 
-import "github.com/0xbew/scrub/internal/vocab"
+import (
+	"slices"
 
-// CodeOwners: `code` holds a credential only after one of these (mfa_code, backup_code).
-var CodeOwners = vocab.CodeOwners
+	"github.com/0xbew/scrub/internal/vocab"
+)
 
-// KeyOwners: a word that owns a `key` (api_key, ssh_key).
-var KeyOwners = vocab.KeyOwners
+// CodeOwners returns the words after which `code` holds a credential (mfa_code, backup_code).
+// The rules are fixed when the package loads, so the copy is for reading only.
+func CodeOwners() []string { return slices.Clone(vocab.CodeOwners) }
+
+// KeyOwners returns the words that own a `key` (api_key, ssh_key). The rules are fixed when
+// the package loads, so the copy is for reading only.
+func KeyOwners() []string { return slices.Clone(vocab.KeyOwners) }
 
 // IsCredentialName reports whether a NAME in `NAME=value`, `"name": value` or `name: value`
 // holds a credential.

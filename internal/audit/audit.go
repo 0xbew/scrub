@@ -25,14 +25,47 @@ type Hit = string
 // Audit returns the rule ids that fire anywhere in text.
 func Audit(text string, d *denylist.List) []Hit { return auditTexts([]string{text}, d) }
 
-// AuditValue: Audit over every string in a JSON-shaped value, keys included.
-func AuditValue(v any, d *denylist.List) []Hit {
-	var texts []string
+// MaxBytes is the most text one audit reads: the readings multiply the text in memory, so
+// more is refused as `unreadable`, never audited in part.
+const MaxBytes = 8 << 20
+
+// AuditValue: Audit over every string in a JSON-shaped value, keys included. A value of any
+// other Go type is read as its JSON encoding, and one that cannot be encoded is `unreadable`.
+func AuditValue(v any, d *denylist.List) (hits []Hit) {
+	defer func() {
+		// A user type's MarshalJSON that panics: the value cannot be shown clean.
+		if recover() != nil {
+			hits = withUnreadable(nil)
+		}
+	}()
+	texts, readable := valueTexts(v)
+	if !readable || textBytes(texts) > MaxBytes {
+		return withUnreadable(auditTexts(nil, d))
+	}
+	return auditTexts(texts, d)
+}
+
+// withUnreadable adds the refusal to what the audit found about the denylist alone.
+func withUnreadable(hits []Hit) []Hit { return append(hits, "unreadable") }
+
+func textBytes(texts []string) int {
+	n := 0
+	for _, t := range texts {
+		n += len(t)
+	}
+	return n
+}
+
+// valueTexts collects every string in v, map keys included. It is not readable when a value
+// has no JSON encoding.
+func valueTexts(v any) (texts []string, readable bool) {
+	readable = true
 	stack := []any{v}
 	for len(stack) > 0 {
 		item := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		switch x := item.(type) {
+		case nil, bool, float64, json.Number:
 		case string:
 			texts = append(texts, x)
 		case map[string]any:
@@ -42,9 +75,18 @@ func AuditValue(v any, d *denylist.List) []Hit {
 			}
 		case []any:
 			stack = append(stack, x...)
+		default:
+			// map[string]string, []string, structs and pointers: what the receiver would read is the JSON.
+			var decoded any
+			raw, err := json.Marshal(x)
+			if err != nil || json.Unmarshal(raw, &decoded) != nil {
+				readable = false
+				continue
+			}
+			stack = append(stack, decoded)
 		}
 	}
-	return auditTexts(texts, d)
+	return texts, readable
 }
 
 // AuditBody: Audit over a JSON document or JSON lines, decoded as the receiver reads them. A
@@ -53,7 +95,7 @@ func AuditBody(body []byte, d *denylist.List) []Hit {
 	if d == nil {
 		return []Hit{"denylist:none"}
 	}
-	if !utf8Valid(body) {
+	if len(body) > MaxBytes || !utf8Valid(body) {
 		return []Hit{"unreadable"}
 	}
 	var values []any
@@ -84,6 +126,9 @@ func auditTexts(texts []string, d *denylist.List) []Hit {
 	// No denylist at all (nil) is a configured list that could not be loaded: refuse. NoDenylist is the choice to go without.
 	if d == nil {
 		return []Hit{"denylist:none"}
+	}
+	if textBytes(texts) > MaxBytes {
+		return []Hit{"unreadable"}
 	}
 	var hits []Hit
 	add := func(rule string, found bool) {

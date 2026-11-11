@@ -6,15 +6,12 @@ import (
 	"github.com/0xbew/scrub/internal/denylist"
 )
 
-// Roles an identity is replaced by.
-var Roles = []string{"owner", "teammate", "person"}
-
 // DenylistError: the denylist cannot be used. The message never quotes an entry or a path.
 type DenylistError struct{ msg string }
 
 func (e *DenylistError) Error() string { return e.msg }
 
-// ErrDenylistMissing: there is no local copy.
+// ErrDenylistMissing: there is no local copy. Compare with errors.Is; do not reassign it.
 var ErrDenylistMissing = &DenylistError{"no local denylist"}
 
 // Denylist is a compiled identity and vendor list, applied whole or refused whole.
@@ -41,7 +38,7 @@ func (d *Denylist) list() *denylist.List {
 
 func wrap(l *denylist.List, err error) (*Denylist, error) {
 	if err != nil {
-		if err == denylist.ErrMissing {
+		if errors.Is(err, denylist.ErrMissing) {
 			return nil, ErrDenylistMissing
 		}
 		var e *denylist.Error

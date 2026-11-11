@@ -236,7 +236,7 @@ NOT the scrubber's detectors (one lexer bug must not blind both, the v11 failure
 JSONL in, JSONL out, the harness's `scrub` contract:
 `{"op": "scrub"|"scrub_diff"|"audit_text"|"audit_body"|"redact", "text": str, "limit": int}`
 -> `{"out": str}` or `{"hits": [...]}`. `--denylist PATH`; a bad denylist is one line
-`{"denylist_error": "..."}` and exit 0. The error never quotes an entry or a path.
+`{"denylist_error": "..."}` and exit 1. The error never quotes an entry or a path.
 
 ## 8. How it is proven (`harness/`)
 

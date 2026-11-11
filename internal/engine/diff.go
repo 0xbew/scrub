@@ -251,6 +251,11 @@ func diffSpans(window string, d *denylist.List, wasCut bool) *span.Set {
 // text it cannot read that way is read every way at once. Every row keeps its marker. A nil
 // denylist sends nothing, as in Scrub.
 func ScrubDiff(text string, d *denylist.List, limit int) string {
+	limit = clampLimit(limit)
+	return fit(scrubDiff(text, d, limit), limit)
+}
+
+func scrubDiff(text string, d *denylist.List, limit int) string {
 	if d == nil {
 		return Cut
 	}

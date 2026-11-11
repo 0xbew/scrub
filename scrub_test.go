@@ -1,6 +1,10 @@
 package scrub
 
-import "testing"
+import (
+	"math"
+	"strings"
+	"testing"
+)
 
 // Classifier cases are the names and values from harness failures; each expected value is the
 // Python oracle's (scrub_names.is_credential_name, looks_secret), not this package's.
@@ -106,4 +110,45 @@ func TestScrubberHidesWhatItsAuditRefuses(t *testing.T) {
 			t.Errorf("%s: own audit refuses the output: %v", c.name, hits)
 		}
 	}
+}
+
+// Each row is a way a caller got a clean or whole answer for something that was not checked or kept readable
+// (found by reading the code against the README's contract).
+func TestEdgesRefuseOrKeepReadable(t *testing.T) {
+	d := fakeDenylist(t)
+	token := "ghp_" + "aB3dE5gH7jK9mN1pQrStUvWxYz0123456789" // split so the release secret scan does not flag a fake token
+	t.Run("a typed map is audited as JSON", func(t *testing.T) {
+		if hits := AuditValue(map[string]string{"k": token}, d); len(hits) == 0 {
+			t.Error("a token in a map[string]string passed the audit")
+		}
+		if hits := AuditValue([]string{token}, d); len(hits) == 0 {
+			t.Error("a token in a []string passed the audit")
+		}
+	})
+	t.Run("a value with no JSON encoding is refused", func(t *testing.T) {
+		if hits := AuditValue(make(chan int), d); len(hits) != 1 || hits[0] != "unreadable" {
+			t.Errorf("got %v, want [unreadable]", hits)
+		}
+	})
+	t.Run("text over the cap is refused", func(t *testing.T) {
+		if hits := Audit(strings.Repeat("a", MaxAuditBytes+1), d); len(hits) != 1 || hits[0] != "unreadable" {
+			t.Errorf("got %v, want [unreadable]", hits)
+		}
+	})
+	t.Run("the README's payload with a version parses", func(t *testing.T) {
+		if _, err := ParseDenylist([]byte(`{"version": 1, "identities": [{"literal": "Zoë Quillfen", "role": "owner"}], "vendors": []}`), 1); err != nil {
+			t.Error(err)
+		}
+		if _, err := ParseDenylist([]byte(`{"version": 2, "identities": [{"literal": "Zoë Quillfen", "role": "owner"}], "vendors": []}`), 1); err == nil {
+			t.Error("a payload version that differs from the one given was accepted")
+		}
+	})
+	t.Run("a limit below the marker sends nothing, and a huge one does not overflow", func(t *testing.T) {
+		if got := Scrub("hello world, this is long enough to cut", d, 3); got != "" {
+			t.Errorf("limit 3: got %q, want empty", got)
+		}
+		if got := Scrub("hello world", d, math.MaxInt); got != "hello world" {
+			t.Errorf("limit MaxInt: got %q", got)
+		}
+	})
 }
