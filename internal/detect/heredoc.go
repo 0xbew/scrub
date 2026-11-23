@@ -14,16 +14,10 @@ func HeredocValues(s string, emit func(lo, hi int)) {
 	lineDone := -1
 	for p := strings.IndexAny(s, "=:"); p >= 0; {
 		if p >= lineDone {
-			if v := lex.SkipBlanks(s, p+1); strings.HasPrefix(s[v:], "<<") && !strings.HasPrefix(s[v:], "<<<") {
-				e := p
-				for e > 0 && (s[e-1] == ' ' || s[e-1] == '\t') {
-					e--
-				}
-				if q := lex.NameRunBefore(s, e); q < e && vocab.IsCredentialName(lex.TrimDashes(s[q:e])) {
-					lineDone = lex.LineEnd(s, v)
-					if lo, hi, ok := heredocBodyAt(s, v); ok {
-						emit(lo, hi)
-					}
+			if v := credentialHeredocAt(s, p); v >= 0 {
+				lineDone = lex.LineEnd(s, v)
+				if lo, hi, ok := heredocBodyAt(s, v); ok {
+					emit(lo, hi)
 				}
 			}
 		}
@@ -35,28 +29,27 @@ func HeredocValues(s string, emit func(lo, hi int)) {
 	}
 }
 
+// credentialHeredocAt: where a heredoc opener `<<` (not `<<<`) starts after the `=` or `:` at
+// p, when a credential's name comes before that sign; -1 otherwise.
+func credentialHeredocAt(s string, p int) int {
+	if v := lex.SkipBlanks(s, p+1); strings.HasPrefix(s[v:], "<<") && !strings.HasPrefix(s[v:], "<<<") {
+		e := p
+		for e > 0 && (s[e-1] == ' ' || s[e-1] == '\t') {
+			e--
+		}
+		if q := lex.NameRunBefore(s, e); q < e && vocab.IsCredentialName(lex.TrimDashes(s[q:e])) {
+			return v
+		}
+	}
+	return -1
+}
+
 // heredocBodyAt: the body of a heredoc whose opener (`<<EOF`, `<<-'END'`) is at i: from the next line to the line
 // that is its word alone (a diff row's marker aside), or to the end of the text when none is, as a cut command
 // leaves it; never past heredocMaxLines lines.
 func heredocBodyAt(s string, i int) (lo, hi int, ok bool) {
-	j := i + 2
-	if j < len(s) && (s[j] == '-' || s[j] == '~') {
-		j++
-	}
-	var quote byte
-	if j < len(s) && (s[j] == '"' || s[j] == '\'') {
-		quote = s[j]
-		j++
-	}
-	w := j
-	for j < len(s) && lex.IsWordAt(s, j) {
-		j++
-	}
-	if j == w {
-		return 0, 0, false
-	}
-	word := s[w:j]
-	if quote != 0 && (j >= len(s) || s[j] != quote) {
+	word, j, ok := heredocOpenerWord(s, i)
+	if !ok {
 		return 0, 0, false
 	}
 	le := lex.LineEnd(s, j)
@@ -65,27 +58,63 @@ func heredocBodyAt(s string, i int) (lo, hi int, ok bool) {
 		return 0, 0, false
 	}
 	lo = le + 1
+	return lo, heredocBodyEnd(s, lo, word), true
+}
+
+// heredocOpenerWord: the word of the heredoc opener at i (`<<EOF`, `<<-'END'`) and where it ends (before a closing
+// quote); false when there is no word or a quoted word does not close.
+func heredocOpenerWord(s string, i int) (string, int, bool) {
+	j := i + 2
+	if j < len(s) && (s[j] == '-' || s[j] == '~') {
+		j++
+	}
+	var quote byte
+	if j < len(s) && (s[j] == '"' || s[j] == '\'') {
+		quote = s[j]
+		j++
+	}
+	w := j
+	for j < len(s) && lex.IsWordAt(s, j) {
+		j++
+	}
+	if j == w {
+		return "", 0, false
+	}
+	if quote != 0 && (j >= len(s) || s[j] != quote) {
+		return "", 0, false
+	}
+	return s[w:j], j, true
+}
+
+// heredocBodyEnd: where the heredoc body starting at lo ends: before the line that is its word alone (a diff row's
+// marker aside), or at the end of the text; never past heredocMaxLines lines.
+func heredocBodyEnd(s string, lo int, word string) int {
 	k := lo
 	for n := 0; n < heredocMaxLines && k < len(s); n++ {
 		e := lex.LineEnd(s, k)
 		line := strings.TrimSpace(strings.TrimRight(s[k:e], "\r"))
 		if line == word || len(line) > 1 && strings.IndexByte("+- ", s[k]) >= 0 && strings.TrimSpace(s[k+1:e]) == word {
-			if k > lo {
-				// The last body line's break (and its carriage return) stays with the terminator.
-				hi = k - 1
-				if hi > lo && s[hi-1] == '\r' {
-					hi--
-				}
-				return lo, hi, true
-			}
-			return lo, lo, true
+			return bodyBeforeTerminator(s, lo, k)
 		}
 		if e >= len(s) {
-			return lo, len(s), true
+			return len(s)
 		}
 		k = e + 1
 	}
-	return lo, k, true
+	return k
+}
+
+// bodyBeforeTerminator: the body's end when its terminator line starts at k.
+func bodyBeforeTerminator(s string, lo, k int) int {
+	if k > lo {
+		// The last body line's break (and its carriage return) stays with the terminator.
+		hi := k - 1
+		if hi > lo && s[hi-1] == '\r' {
+			hi--
+		}
+		return hi
+	}
+	return lo
 }
 
 // heredocMaxLines: a heredoc body is read this many lines at most.
@@ -93,8 +122,26 @@ const heredocMaxLines = 2000
 
 // HeredocAt: a real heredoc opener at i (`<<EOF` then a line break), its body's span.
 func HeredocAt(s string, i int) (bodyLo, bodyHi int, ok bool) {
-	if !strings.HasPrefix(s[i:], "<<") {
+	word, j, ok := heredocOpener(s, i)
+	if !ok {
 		return 0, 0, false
+	}
+	le := lex.LineEnd(s, j)
+	rest := s[j:le]
+	// An opener followed by an escaped line break is not one (JSON): the escaped heredoc.
+	if strings.Contains(rest, `\n`) || le-j > 2000 || le >= len(s) {
+		return 0, 0, false
+	}
+	body := le + 1
+	return body, heredocLinesEnd(s, body, word), true
+}
+
+// heredocOpener: the terminator word a `<<` opener at i names (after an optional `-` or `~`,
+// perhaps in matching quotes) and the end of the opener; not ok when no word follows or its
+// quote is not closed.
+func heredocOpener(s string, i int) (word string, end int, ok bool) {
+	if !strings.HasPrefix(s[i:], "<<") {
+		return "", 0, false
 	}
 	j := i + 2
 	if j < len(s) && (s[j] == '-' || s[j] == '~') {
@@ -110,22 +157,22 @@ func HeredocAt(s string, i int) (bodyLo, bodyHi int, ok bool) {
 		j++
 	}
 	if j == w {
-		return 0, 0, false
+		return "", 0, false
 	}
-	word := s[w:j]
+	word = s[w:j]
 	if quote != 0 {
 		if j >= len(s) || s[j] != quote {
-			return 0, 0, false
+			return "", 0, false
 		}
 		j++
 	}
-	le := lex.LineEnd(s, j)
-	rest := s[j:le]
-	// An opener followed by an escaped line break is not one (JSON): the escaped heredoc.
-	if strings.Contains(rest, `\n`) || le-j > 2000 || le >= len(s) {
-		return 0, 0, false
-	}
-	body := le + 1
+	return word, j, true
+}
+
+// heredocLinesEnd: the end of a heredoc body that starts at body: before the first line that is
+// word alone (blanks aside), before an unterminated last line, or after the 200th line; the last
+// body line's break stays with the terminator.
+func heredocLinesEnd(s string, body int, word string) int {
 	k := body
 	for n := 0; n < 200 && k < len(s); n++ {
 		e := lex.LineEnd(s, k)
@@ -141,7 +188,7 @@ func HeredocAt(s string, i int) (bodyLo, bodyHi int, ok bool) {
 	if k > body && s[k-1] == '\n' {
 		k-- // the last body line's break stays with the terminator
 	}
-	return body, k, true
+	return k
 }
 
 // escapedHeredocEnd: a heredoc written with escaped line breaks (`<<EOF\nx\nEOF`): one

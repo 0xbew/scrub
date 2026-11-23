@@ -35,30 +35,11 @@ func (c *Scan) bearer() {
 			w++
 		}
 		if bearerProse[strings.ToLower(s[v:w])] {
-			after := w
-			tokenish := after < len(s) && (lex.IsAlnumASCII(s[after]) || strings.IndexByte("_~+/-=", s[after]) >= 0)
-			if !tokenish && after+1 < len(s) && s[after] == '.' && isBearerChar(s[after+1]) && s[after+1] != '.' {
-				tokenish = true
-			}
-			if !tokenish {
+			if !bearerTokenishAfter(s, w) {
 				continue
 			}
 		}
-		e := v
-		for e < len(s) {
-			if isBearerChar(s[e]) {
-				e++
-				continue
-			}
-			if n := lex.ContAt(s, e); n > 0 {
-				k := SkipConts(s, e)
-				if k < len(s) && isBearerChar(s[k]) {
-					e = k
-					continue
-				}
-			}
-			break
-		}
+		e := bearerValueEnd(s, v)
 		if e == v {
 			continue
 		}
@@ -67,4 +48,35 @@ func (c *Scan) bearer() {
 		}
 		c.hideValue(v, e)
 	}
+}
+
+// bearerTokenishAfter: something token-like follows a prose word ending at after: a letter, a
+// digit or one of `_~+/-=`, or a `.` and a token's character other than `.`.
+func bearerTokenishAfter(s string, after int) bool {
+	tokenish := after < len(s) && (lex.IsAlnumASCII(s[after]) || strings.IndexByte("_~+/-=", s[after]) >= 0)
+	if !tokenish && after+1 < len(s) && s[after] == '.' && isBearerChar(s[after+1]) && s[after+1] != '.' {
+		tokenish = true
+	}
+	return tokenish
+}
+
+// bearerValueEnd: the end of the token at v, through continuations that a token's character
+// follows.
+func bearerValueEnd(s string, v int) int {
+	e := v
+	for e < len(s) {
+		if isBearerChar(s[e]) {
+			e++
+			continue
+		}
+		if n := lex.ContAt(s, e); n > 0 {
+			k := SkipConts(s, e)
+			if k < len(s) && isBearerChar(s[k]) {
+				e = k
+				continue
+			}
+		}
+		break
+	}
+	return e
 }

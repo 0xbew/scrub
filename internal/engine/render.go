@@ -40,64 +40,10 @@ func label(kinds uint16) string {
 // line break is never hidden; otherwise one inside a hidden span goes with it, as one value.
 // It also returns, for each output byte, the source span it stands for.
 func render(s string, spans *span.Set, keepLines bool) (string, [][2]int) {
-	mask := make([]uint16, len(s))
-	for _, sp := range spans.Spans {
-		lo, hi := sp.Lo, sp.Hi
-		if lo < 0 {
-			lo = 0
-		}
-		if hi > len(s) {
-			hi = len(s)
-		}
-		for i := lo; i < hi; i++ {
-			mask[i] |= 1 << sp.Kind
-		}
-	}
-	// Whole runes: a run never splits one.
-	for i := 0; i < len(s); i++ {
-		if mask[i] != 0 && s[i] >= utf8.RuneSelf {
-			j := i
-			for j > 0 && s[j]&0xC0 == 0x80 {
-				j--
-			}
-			_, sz := utf8.DecodeRuneInString(s[j:])
-			for k := j; k < j+sz && k < len(s); k++ {
-				mask[k] |= mask[i]
-			}
-		}
-	}
-	// A bracket opened inside a hidden run is the value's: its closer right after goes too.
-	for i := 0; i < len(s); {
-		if mask[i] == 0 {
-			i++
-			continue
-		}
-		j := i
-		var open []byte
-		for j < len(s) && mask[j] != 0 {
-			switch s[j] {
-			case '(', '[', '{':
-				open = append(open, s[j])
-			case ')', ']', '}':
-				if len(open) > 0 && open[len(open)-1] == opener(s[j]) {
-					open = open[:len(open)-1]
-				}
-			}
-			j++
-		}
-		for j < len(s) && len(open) > 0 && opener(s[j]) == open[len(open)-1] {
-			mask[j] = mask[j-1]
-			open = open[:len(open)-1]
-			j++
-		}
-		i = j
-	}
-	// A lone quote between two hidden runs is a value's, paired wrongly: it goes with them.
-	for i := 1; i+1 < len(s); i++ {
-		if mask[i] == 0 && (s[i] == '"' || s[i] == '\'') && mask[i-1] != 0 && mask[i+1] != 0 {
-			mask[i] = mask[i-1]
-		}
-	}
+	mask := spanMask(s, spans)
+	wholeRunes(s, mask)
+	bracketClosers(s, mask)
+	loneQuotes(s, mask)
 	isBreak := func(i int) bool { return s[i] == '\n' || s[i] == '\r' }
 	var b strings.Builder
 	var src [][2]int
@@ -144,51 +90,71 @@ func fixup(out string, emit func(lo, hi int)) {
 	for _, r := range reading.Of(reading.Raw(out), true) {
 		t := r.Text
 		for p := strings.IndexByte(t, '='); p >= 0; p = lex.NextByte(t, '=', p+1) {
-			q := lex.NameRunBefore(t, p)
-			if q == p {
-				continue
-			}
-			name := lex.TrimDashes(t[q:p])
-			if name == "" || !(vocab.IsCredentialName(name) || detect.HasKeyword(name)) {
-				continue
-			}
-			lo, hi := auditWordAt(t, p+1)
-			inQuotes := false
-			// A quoted word that opens with the assignment holds its value to its closing quote.
-			if q > 0 && (t[q-1] == '"' || t[q-1] == '\'') {
-				inQuotes = true
-				e := p + 1
-				for e < len(t) && t[e] != t[q-1] && t[e] != '\n' {
-					e++
-				}
-				if e > hi {
-					hi = e
-				}
-			}
-			v := t[lo:hi]
-			if !strings.Contains(v, "<redacted") && !strings.Contains(v, "<long-token>") {
-				continue
-			}
-			// A credential's value, as a receiver splits it from `NAME=` (a quoted string, or a run to a
-			// space or quote), is the placeholder alone or it is a value partly sent: a closer or an
-			// escape glued to it (`api_key=<redacted>)`) goes with it.
-			bare := strings.Trim(t[lo:hi], "\"'")
-			strict := !inQuotes && vocab.IsCredentialName(name) && bare != "" && bare != lex.PhRedacted
-			if !strict && (lex.OnlyPlaceholders(v) || (!inQuotes && detect.HeldOnlyAt(t, lo, hi))) {
-				continue
-			}
-			if len(v) > 1 && (v[0] == '"' || v[0] == '\'') {
-				lo++
-				if v[len(v)-1] == v[0] {
-					hi--
-				}
-			}
-			olo, ohi := r.Source(lo, hi)
-			if olo < ohi {
-				emit(olo, ohi)
-			}
+			fixupAt(r, p, emit)
 		}
 	}
+}
+
+// fixupAt: the assignment at the `=` at p in the reading r, when its name is a credential's or
+// a keyword and its value holds a placeholder and is a value partly sent (for a credential's
+// unquoted value, anything but the bare placeholder): the whole value, in source offsets.
+func fixupAt(r *reading.Reading, p int, emit func(lo, hi int)) {
+	t := r.Text
+	q := lex.NameRunBefore(t, p)
+	if q == p {
+		return
+	}
+	name := lex.TrimDashes(t[q:p])
+	if name == "" || !credentialOrKeyword(name) {
+		return
+	}
+	lo, hi := auditWordAt(t, p+1)
+	inQuotes := false
+	// A quoted word that opens with the assignment holds its value to its closing quote.
+	if q > 0 && (t[q-1] == '"' || t[q-1] == '\'') {
+		inQuotes = true
+		hi = quotedAssignmentEnd(t, q, p, hi)
+	}
+	v := t[lo:hi]
+	if !strings.Contains(v, "<redacted") && !strings.Contains(v, "<long-token>") {
+		return
+	}
+	// A credential's value, as a receiver splits it from `NAME=` (a quoted string, or a run to a
+	// space or quote), is the placeholder alone or it is a value partly sent: a closer or an
+	// escape glued to it (`api_key=<redacted>)`) goes with it.
+	bare := strings.Trim(t[lo:hi], "\"'")
+	strict := !inQuotes && vocab.IsCredentialName(name) && bare != "" && bare != lex.PhRedacted
+	if !strict && (lex.OnlyPlaceholders(v) || (!inQuotes && detect.HeldOnlyAt(t, lo, hi))) {
+		return
+	}
+	if len(v) > 1 && (v[0] == '"' || v[0] == '\'') {
+		lo++
+		if v[len(v)-1] == v[0] {
+			hi--
+		}
+	}
+	olo, ohi := r.Source(lo, hi)
+	if olo < ohi {
+		emit(olo, ohi)
+	}
+}
+
+// credentialOrKeyword: name is a credential's name or holds a keyword.
+func credentialOrKeyword(name string) bool {
+	return vocab.IsCredentialName(name) || detect.HasKeyword(name)
+}
+
+// quotedAssignmentEnd: the value's end hi, or, when later, the closing quote (or line end) of the
+// quoted word that opens at q-1 with the assignment at p.
+func quotedAssignmentEnd(t string, q, p, hi int) int {
+	e := p + 1
+	for e < len(t) && t[e] != t[q-1] && t[e] != '\n' {
+		e++
+	}
+	if e > hi {
+		hi = e
+	}
+	return hi
 }
 
 // auditWordAt: the receiver's reading of a value after `=`: `"..."?`, `'...'?`, or a run
@@ -212,4 +178,82 @@ func auditWordAt(s string, i int) (int, int) {
 		j++
 	}
 	return i, j
+}
+
+// spanMask: for each byte of s, the kinds of the spans that hide it.
+func spanMask(s string, spans *span.Set) []uint16 {
+	mask := make([]uint16, len(s))
+	for _, sp := range spans.Spans {
+		lo, hi := sp.Lo, sp.Hi
+		if lo < 0 {
+			lo = 0
+		}
+		if hi > len(s) {
+			hi = len(s)
+		}
+		for i := lo; i < hi; i++ {
+			mask[i] |= 1 << sp.Kind
+		}
+	}
+	return mask
+}
+
+// wholeRunes: a hidden byte of a multi-byte rune hides the whole rune, so a run never splits one.
+func wholeRunes(s string, mask []uint16) {
+	for i := 0; i < len(s); i++ {
+		if mask[i] != 0 && s[i] >= utf8.RuneSelf {
+			j := i
+			for j > 0 && s[j]&0xC0 == 0x80 {
+				j--
+			}
+			_, sz := utf8.DecodeRuneInString(s[j:])
+			for k := j; k < j+sz && k < len(s); k++ {
+				mask[k] |= mask[i]
+			}
+		}
+	}
+}
+
+// bracketClosers: a bracket opened inside a hidden run is the value's: its closer right after goes too.
+func bracketClosers(s string, mask []uint16) {
+	for i := 0; i < len(s); {
+		if mask[i] == 0 {
+			i++
+			continue
+		}
+		j, open := hiddenRunOpen(s, mask, i)
+		for j < len(s) && len(open) > 0 && opener(s[j]) == open[len(open)-1] {
+			mask[j] = mask[j-1]
+			open = open[:len(open)-1]
+			j++
+		}
+		i = j
+	}
+}
+
+// hiddenRunOpen: the end of the hidden run at i, and the brackets opened in it and not closed.
+func hiddenRunOpen(s string, mask []uint16, i int) (int, []byte) {
+	j := i
+	var open []byte
+	for j < len(s) && mask[j] != 0 {
+		switch s[j] {
+		case '(', '[', '{':
+			open = append(open, s[j])
+		case ')', ']', '}':
+			if len(open) > 0 && open[len(open)-1] == opener(s[j]) {
+				open = open[:len(open)-1]
+			}
+		}
+		j++
+	}
+	return j, open
+}
+
+// loneQuotes: a lone quote between two hidden runs is a value's, paired wrongly: it goes with them.
+func loneQuotes(s string, mask []uint16) {
+	for i := 1; i+1 < len(s); i++ {
+		if mask[i] == 0 && (s[i] == '"' || s[i] == '\'') && mask[i-1] != 0 && mask[i+1] != 0 {
+			mask[i] = mask[i-1]
+		}
+	}
 }

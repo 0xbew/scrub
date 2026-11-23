@@ -75,36 +75,45 @@ func LineStart(s string, i int) int {
 // dqEnd: a double-quoted part opening at i. Closed, it may span lines (escapes honoured);
 // with no closing quote it runs to its line's end.
 func dqEnd(s string, i int) int {
+	if end, ok := closedDqEnd(s, i); ok {
+		return end
+	}
+	// Unclosed: to the line end, an escaped line break continuing it.
+	return unclosedDqEnd(s, i)
+}
+
+// closedDqEnd: just past the closing quote of the double-quoted part opening at i; false when it never closes
+// (an escape as the text's last byte counts as unclosed).
+func closedDqEnd(s string, i int) (int, bool) {
 	j := i + 1
 	for j < len(s) {
 		c := s[j]
 		if c == '\\' {
 			if j+1 >= len(s) {
-				break
+				return 0, false
 			}
-			j += 2
-			if s[j-1] == '\r' && j < len(s) && s[j] == '\n' {
-				j++
-			}
+			j = escapeEnd(s, j)
 			continue
 		}
 		if c == '"' {
-			return j + 1
+			return j + 1, true
 		}
 		j++
 	}
-	// Unclosed: to the line end, an escaped line break continuing it.
-	j = i + 1
+	return 0, false
+}
+
+// unclosedDqEnd: where an unclosed double-quoted part opening at i stops: its line's end, or the text's
+// last byte when that is an escape.
+func unclosedDqEnd(s string, i int) int {
+	j := i + 1
 	for j < len(s) {
 		c := s[j]
 		if c == '\\' {
 			if j+1 >= len(s) {
 				return j
 			}
-			j += 2
-			if s[j-1] == '\r' && j < len(s) && s[j] == '\n' {
-				j++
-			}
+			j = escapeEnd(s, j)
 			continue
 		}
 		if c == '\n' {
@@ -113,6 +122,15 @@ func dqEnd(s string, i int) int {
 		j++
 	}
 	return len(s)
+}
+
+// escapeEnd: just past the escape at j (a backslash with a byte after it); an escaped `\r` takes a `\n` after it too.
+func escapeEnd(s string, j int) int {
+	j += 2
+	if s[j-1] == '\r' && j < len(s) && s[j] == '\n' {
+		j++
+	}
+	return j
 }
 
 // SqEnd: a single-quoted part opening at i; no escapes. Closed it may span lines;

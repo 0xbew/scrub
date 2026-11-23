@@ -56,12 +56,7 @@ func renderFixed(s string, spans *span.Set, keepLines bool, redetect func(string
 		if len(more.Spans) == 0 && !gate.Off(gate.Converge) {
 			return out
 		}
-		for _, sp := range more.Spans {
-			if sp.Lo >= sp.Hi || sp.Hi > len(src) {
-				continue
-			}
-			spans.Add(src[sp.Lo][0], src[sp.Hi-1][1], sp.Kind)
-		}
+		addMappedBack(spans, more, src)
 		next, nsrc := render(s, spans, keepLines)
 		if next == out && gate.Off(gate.Converge) {
 			next = out + " "
@@ -70,17 +65,34 @@ func renderFixed(s string, spans *span.Set, keepLines bool, redetect func(string
 			return out
 		}
 		if round == maxRounds {
-			k := 0
-			for k < len(out) && k < len(next) && out[k] == next[k] {
-				k++
-			}
-			head := out[:strings.LastIndexByte(out[:k], '\n')+1]
-			if head != "" && len(reread(head, keepLines, redetect).Spans) == 0 {
-				return head + Cut
-			}
-			return Cut
+			return unsettledCut(out, next, keepLines, redetect)
 		}
 		out, src = next, nsrc
 	}
 	return out
+}
+
+// addMappedBack adds each span the rereading found, mapped from rendered offsets back to the source; an empty
+// span or one past the rendering's source map is skipped.
+func addMappedBack(spans, more *span.Set, src [][2]int) {
+	for _, sp := range more.Spans {
+		if sp.Lo >= sp.Hi || sp.Hi > len(src) {
+			continue
+		}
+		spans.Add(src[sp.Lo][0], src[sp.Hi-1][1], sp.Kind)
+	}
+}
+
+// unsettledCut: what goes out when the rendering still changes after the last round: the lines before the
+// first byte that round changed, when they read clean again, then the cut marker; otherwise the marker alone.
+func unsettledCut(out, next string, keepLines bool, redetect func(string) *span.Set) string {
+	k := 0
+	for k < len(out) && k < len(next) && out[k] == next[k] {
+		k++
+	}
+	head := out[:strings.LastIndexByte(out[:k], '\n')+1]
+	if head != "" && len(reread(head, keepLines, redetect).Spans) == 0 {
+		return head + Cut
+	}
+	return Cut
 }

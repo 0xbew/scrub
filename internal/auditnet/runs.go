@@ -89,25 +89,7 @@ func netRandom(run string) bool {
 func netJWTRemnant(s string) bool {
 	const ph = "<long-token>"
 	for k := strings.Index(s, ph); k >= 0; {
-		lo, hi := k, k+len(ph)
-		for {
-			if lo > 0 && netJWTChar(s[lo-1]) {
-				lo--
-			} else if lo >= len(ph) && s[lo-len(ph):lo] == ph {
-				lo -= len(ph)
-			} else {
-				break
-			}
-		}
-		for {
-			if hi < len(s) && netJWTChar(s[hi]) {
-				hi++
-			} else if strings.HasPrefix(s[hi:], ph) {
-				hi += len(ph)
-			} else {
-				break
-			}
-		}
+		lo, hi := netJWTRunStart(s, k, ph), netJWTRunEnd(s, k+len(ph), ph)
 		w := s[lo:hi]
 		if strings.Count(w, ".") >= 2 && (strings.Count(w, ph) >= 2 || strings.HasPrefix(w, "eyJ")) &&
 			netRandomPiece(strings.ReplaceAll(w, ph, " ")) {
@@ -120,6 +102,34 @@ func netJWTRemnant(s string) bool {
 		k = hi + next
 	}
 	return false
+}
+
+// netJWTRunStart: back from lo over base64url characters, dots and placeholders ph.
+func netJWTRunStart(s string, lo int, ph string) int {
+	for {
+		if lo > 0 && netJWTChar(s[lo-1]) {
+			lo--
+		} else if lo >= len(ph) && s[lo-len(ph):lo] == ph {
+			lo -= len(ph)
+		} else {
+			break
+		}
+	}
+	return lo
+}
+
+// netJWTRunEnd: on from hi over base64url characters, dots and placeholders ph.
+func netJWTRunEnd(s string, hi int, ph string) int {
+	for {
+		if hi < len(s) && netJWTChar(s[hi]) {
+			hi++
+		} else if strings.HasPrefix(s[hi:], ph) {
+			hi += len(ph)
+		} else {
+			break
+		}
+	}
+	return hi
 }
 
 func netJWTChar(c byte) bool { return lex.IsAlnumASCII(c) || c == '-' || c == '_' || c == '.' }

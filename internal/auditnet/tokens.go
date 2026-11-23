@@ -213,20 +213,31 @@ func netAnchorBefore(s string, k int) bool {
 		if f.anchor > 0 || len(a) < 3 {
 			continue
 		}
-		for n := len(a); n >= 4 || n == len(a); n-- {
-			if n > k {
-				continue
-			}
-			t := s[k-n : k]
-			if f.segs[f.anchor].fold {
-				t = lex.AsciiLower(t)
-			}
-			if t == a[:n] && (k-n == 0 || !lex.IsAlnumASCII(s[k-n-1])) {
-				return true
-			}
-			if n <= 4 {
-				break
-			}
+		if netAnchorPrefixBefore(s, k, f) {
+			return true
+		}
+	}
+	return false
+}
+
+// netAnchorPrefixBefore: f's leading anchor (lowercased first when it folds), whole or, when
+// longer than 4 bytes, cut to a prefix of at least 4 bytes, ends at k with no ASCII letter or
+// digit before it.
+func netAnchorPrefixBefore(s string, k int, f netFormat) bool {
+	a := f.segs[f.anchor].text
+	for n := len(a); n >= 4 || n == len(a); n-- {
+		if n > k {
+			continue
+		}
+		t := s[k-n : k]
+		if f.segs[f.anchor].fold {
+			t = lex.AsciiLower(t)
+		}
+		if t == a[:n] && (k-n == 0 || !lex.IsAlnumASCII(s[k-n-1])) {
+			return true
+		}
+		if n <= 4 {
+			break
 		}
 	}
 	return false
@@ -248,22 +259,31 @@ func netFormatInto(s string, k int) bool {
 			hay = lowered
 		}
 		for at := strings.LastIndex(hay, a.text); at >= 0; {
-			start := lo + at
-			// The token starts a word (`disk-encryption-` holds `sk-` but is no token), its runs before the fixed text
-			// as long as the format allows.
-			for b := start; b >= lo; b-- {
-				if (b == 0 || !lex.IsAlnumASCII(s[b-1]) || f.glued) && k-b >= 8 && netBackTo(f.segs[:f.anchor], s, start, b) &&
-					netForwardTo(f.segs[f.anchor+1:], s, start+len(a.text), k) {
-					return true
-				}
-				if f.anchor == 0 {
-					break
-				}
+			if netFormatFrom(s, f, lo, lo+at, k) {
+				return true
 			}
 			if at == 0 {
 				break
 			}
 			at = strings.LastIndex(hay[:at], a.text)
+		}
+	}
+	return false
+}
+
+// netFormatFrom: the format f with its fixed text at start, its runs before it starting a word at
+// or after lo and its body after it running into the placeholder at k, eight characters or more.
+func netFormatFrom(s string, f netFormat, lo, start, k int) bool {
+	a := f.segs[f.anchor]
+	// The token starts a word (`disk-encryption-` holds `sk-` but is no token), its runs before the fixed text
+	// as long as the format allows.
+	for b := start; b >= lo; b-- {
+		if (b == 0 || !lex.IsAlnumASCII(s[b-1]) || f.glued) && k-b >= 8 && netBackTo(f.segs[:f.anchor], s, start, b) &&
+			netForwardTo(f.segs[f.anchor+1:], s, start+len(a.text), k) {
+			return true
+		}
+		if f.anchor == 0 {
+			break
 		}
 	}
 	return false
@@ -402,15 +422,8 @@ func netWordLike(p string) bool {
 				return false
 			}
 		case lex.IsLowerASCII(c):
-			if i == 0 || !lex.IsLowerASCII(p[i-1]) {
-				j := i
-				for j < len(p) && lex.IsLowerASCII(p[j]) {
-					j++
-				}
-				// One letter after a capital is a short word (`requestId`, `getById`).
-				if j-i < 2 && !(j-i == 1 && i > 0 && (p[i-1:i+1] == "Id" || p[i-1:i+1] == "By")) {
-					return false
-				}
+			if (i == 0 || !lex.IsLowerASCII(p[i-1])) && !netLowerRunOK(p, i) {
+				return false
 			}
 		case lex.IsDigitASCII(c):
 		default:
@@ -418,4 +431,14 @@ func netWordLike(p string) bool {
 		}
 	}
 	return true
+}
+
+// netLowerRunOK: the run of lower-case letters starting at i is two or more long, or is the one letter of
+// `Id` or `By` after its capital (`requestId`, `getById`).
+func netLowerRunOK(p string, i int) bool {
+	j := i
+	for j < len(p) && lex.IsLowerASCII(p[j]) {
+		j++
+	}
+	return j-i >= 2 || j-i == 1 && i > 0 && (p[i-1:i+1] == "Id" || p[i-1:i+1] == "By")
 }

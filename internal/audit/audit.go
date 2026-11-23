@@ -144,9 +144,27 @@ func auditTexts(texts []string, d *denylist.List) []Hit {
 		}
 		return false
 	}
-	// Every reading of every text, read once; shapes and the denylist skip a joined one.
-	var apart, unescaped []string
-	var all []*reading.Reading
+	apart, unescaped, all := readingsOf(texts)
+	// The safety net's own checks (internal/auditnet): what a blind detector would let through, refused anyway.
+	net := auditnet.NetHits(all, d)
+	add("email", anyOf(apart, detect.HasEmail) || net["email"])
+	// Phones as the scrubber reads them: not percent-decoded, where `+` is a space.
+	add("phone", any(hasPhone) || anyOf(unescaped, hasPhone) || net["phone"])
+	if d != nil {
+		denylistHits(add, apart, net, d)
+	}
+	found := secretsFound(texts, net)
+	for _, rule := range []string{"secret:token-format", "secret:jwt", "secret:long-run", "secret:json-field", "secret:named-value", "secret:flag-value",
+		"secret:header", "secret:scheme-value", "secret:colon-value"} {
+		add(rule, found[rule])
+	}
+	return hits
+}
+
+// readingsOf: every reading of every text, read once; apart and unescaped are the texts of
+// the readings that are not joined (unescaped: not raw and not percent-decoded), for shapes
+// and the denylist.
+func readingsOf(texts []string) (apart, unescaped []string, all []*reading.Reading) {
 	for _, t := range texts {
 		for _, r := range reading.Of(reading.Raw(t), true) {
 			all = append(all, r)
@@ -158,21 +176,23 @@ func auditTexts(texts []string, d *denylist.List) []Hit {
 			}
 		}
 	}
-	// The safety net's own checks (internal/auditnet): what a blind detector would let through, refused anyway.
-	net := auditnet.NetHits(all, d)
-	add("email", anyOf(apart, detect.HasEmail) || net["email"])
-	// Phones as the scrubber reads them: not percent-decoded, where `+` is a space.
-	add("phone", any(hasPhone) || anyOf(unescaped, hasPhone) || net["phone"])
-	if d != nil {
-		for _, id := range d.Identities {
-			id := id
-			add(id.Rule, anyOf(apart, func(t string) bool { return denylist.MatchesWithBoundary(id.Rx, t, id.Literal) }) || net[id.Rule])
-		}
-		for _, v := range d.Vendors {
-			v := v
-			add(v.Rule, anyOf(apart, func(t string) bool { return v.Rx.MatchString(t) }))
-		}
+	return apart, unescaped, all
+}
+
+// denylistHits: each identity and vendor of d that a reading apart matches (an identity also
+// when the safety net found it), added in the list's order.
+func denylistHits(add func(string, bool), apart []string, net map[string]bool, d *denylist.List) {
+	for _, id := range d.Identities {
+		add(id.Rule, anyOf(apart, func(t string) bool { return denylist.MatchesWithBoundary(id.Rx, t, id.Literal) }) || net[id.Rule])
 	}
+	for _, v := range d.Vendors {
+		add(v.Rule, anyOf(apart, func(t string) bool { return v.Rx.MatchString(t) }))
+	}
+}
+
+// secretsFound: the secret rules the safety net found, and those every reading of every
+// text finds, by the token, JWT and long-run checks and then the auditor's own.
+func secretsFound(texts []string, net map[string]bool) map[string]bool {
 	found := map[string]bool{}
 	for rule, hit := range net {
 		if hit && strings.HasPrefix(rule, "secret:") {
@@ -194,47 +214,14 @@ func auditTexts(texts []string, d *denylist.List) []Hit {
 			a.run()
 		}
 	}
-	for _, rule := range []string{"secret:token-format", "secret:jwt", "secret:long-run", "secret:json-field", "secret:named-value", "secret:flag-value",
-		"secret:header", "secret:scheme-value", "secret:colon-value"} {
-		add(rule, found[rule])
-	}
-	return hits
+	return found
 }
 
 // hasJWT: the audit's own JWT reading, not the scrubber's pattern: `eyJ` and three dot-joined base64url
 // segments of at least 5 characters each after a word's start, of at least 10 glued to a word before it.
 func hasJWT(s string) bool {
 	for i := strings.Index(s, "eyJ"); i >= 0; {
-		min := 5
-		if i > 0 && (lex.IsAlnumASCII(s[i-1]) || s[i-1] == '_') {
-			min = 10
-		}
-		j, segs := i, 0
-		for segs < 3 {
-			k := j
-			for k < len(s) && (lex.IsAlnumASCII(s[k]) || s[k] == '-' || s[k] == '_') {
-				k++
-			}
-			// The first segment's `eyJ` does not count toward its length, as the scrubber's patterns read it.
-			need := min
-			if segs == 0 {
-				need += 3
-			}
-			if k-j < need {
-				if segs == 0 {
-					j = k
-				}
-				break
-			}
-			segs++
-			if segs < 3 {
-				if k >= len(s) || s[k] != '.' {
-					break
-				}
-				k++
-			}
-			j = k
-		}
+		j, segs := jwtSegments(s, i)
 		if segs == 3 && !lex.OnlyPlaceholders(s[i:j]) {
 			return true
 		}
@@ -253,6 +240,48 @@ func hasJWT(s string) bool {
 		i = from + n
 	}
 	return false
+}
+
+// jwtSegments: how many of a JWT's three segments read from the `eyJ` at i (segs), and the
+// position the next search resumes from (j).
+func jwtSegments(s string, i int) (j, segs int) {
+	min := 5
+	if i > 0 && (lex.IsAlnumASCII(s[i-1]) || s[i-1] == '_') {
+		min = 10
+	}
+	j, segs = i, 0
+	for segs < 3 {
+		k := jwtSegmentEnd(s, j)
+		// The first segment's `eyJ` does not count toward its length, as the scrubber's patterns read it.
+		need := min
+		if segs == 0 {
+			need += 3
+		}
+		if k-j < need {
+			if segs == 0 {
+				j = k
+			}
+			break
+		}
+		segs++
+		if segs < 3 {
+			if k >= len(s) || s[k] != '.' {
+				break
+			}
+			k++
+		}
+		j = k
+	}
+	return j, segs
+}
+
+// jwtSegmentEnd: the end of the base64url run at j.
+func jwtSegmentEnd(s string, j int) int {
+	k := j
+	for k < len(s) && (lex.IsAlnumASCII(s[k]) || s[k] == '-' || s[k] == '_') {
+		k++
+	}
+	return k
 }
 
 // receiverValueEnd: `"(?:\\.|[^"\\\n])*"?`, `'[^'\n]*'?` or `[^\s"']+` at i.

@@ -27,36 +27,46 @@ func OnlyPlaceholders(v string) bool {
 	found := false
 	i := 0
 	for i < len(v) {
-		if n := PlaceholderAt(v, i); n > 0 {
-			i += n
+		end, placeholder := hiddenPartEnd(v, i)
+		if end < 0 {
+			return false
+		}
+		if placeholder {
 			found = true
-			continue
 		}
-		c := v[i]
-		if c == ' ' || c == '\t' || c == '"' || c == '\'' || c == '\\' {
-			i++
-			continue
-		}
-		// A value read across rows of a diff: a line break and the next row's marker hold nothing.
-		if c == '\n' || c == '\r' {
-			i++
-			if i < len(v) && v[i-1] == '\n' && (v[i] == '+' || v[i] == '-') {
-				i++
-			}
-			continue
-		}
-		// An auth scheme word kept before a placeholder.
-		j := i
-		for j < len(v) && IsAlnumASCII(v[j]) {
-			j++
-		}
-		if j > i && AuthSchemes[strings.ToLower(v[i:j])] {
-			i = j
-			continue
-		}
-		return false
+		i = end
 	}
 	return found
+}
+
+// hiddenPartEnd: the end of the part of v at i that holds nothing (a placeholder, a quote,
+// backslash or blank, a line break with the next diff row's marker, or an auth scheme word),
+// whether that part is a placeholder, and -1 when the part is anything else.
+func hiddenPartEnd(v string, i int) (end int, placeholder bool) {
+	if n := PlaceholderAt(v, i); n > 0 {
+		return i + n, true
+	}
+	c := v[i]
+	if c == ' ' || c == '\t' || c == '"' || c == '\'' || c == '\\' {
+		return i + 1, false
+	}
+	// A value read across rows of a diff: a line break and the next row's marker hold nothing.
+	if c == '\n' || c == '\r' {
+		i++
+		if i < len(v) && v[i-1] == '\n' && (v[i] == '+' || v[i] == '-') {
+			i++
+		}
+		return i, false
+	}
+	// An auth scheme word kept before a placeholder.
+	j := i
+	for j < len(v) && IsAlnumASCII(v[j]) {
+		j++
+	}
+	if j > i && AuthSchemes[strings.ToLower(v[i:j])] {
+		return j, false
+	}
+	return -1, false
 }
 
 // PlaceholderValue: Python's audit reading of a value as already hidden (scrub._PLACEHOLDER_VALUE

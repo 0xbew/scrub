@@ -39,52 +39,52 @@ func HunkHeader(s string) (oldN, newN, end int, ok bool) {
 	if !strings.HasPrefix(s, "@@ -") {
 		return 0, 0, 0, false
 	}
-	i := 4
-	num := func() (int, int, bool) {
-		j := i
-		for j < len(s) && IsDigitASCII(s[j]) && j-i < 18 {
-			j++
-		}
-		if j == i || (j < len(s) && IsDigitASCII(s[j])) {
-			return 0, i, false
-		}
-		n, err := strconv.Atoi(s[i:j])
-		return n, j, err == nil
-	}
-	if _, j, ok := num(); ok {
-		i = j
-	} else {
+	oldN, i, ok := hunkRange(s, 4)
+	if !ok {
 		return 0, 0, 0, false
-	}
-	oldN = 1
-	if i < len(s) && s[i] == ',' {
-		i++
-		n, j, ok := num()
-		if !ok {
-			return 0, 0, 0, false
-		}
-		oldN, i = n, j
 	}
 	if !strings.HasPrefix(s[i:], " +") {
 		return 0, 0, 0, false
 	}
-	i += 2
-	if _, j, ok := num(); ok {
-		i = j
-	} else {
+	newN, i, ok = hunkRange(s, i+2)
+	if !ok {
 		return 0, 0, 0, false
-	}
-	newN = 1
-	if i < len(s) && s[i] == ',' {
-		i++
-		n, j, ok := num()
-		if !ok {
-			return 0, 0, 0, false
-		}
-		newN, i = n, j
 	}
 	if !strings.HasPrefix(s[i:], " @@") {
 		return 0, 0, 0, false
 	}
 	return oldN, newN, i + 3, true
+}
+
+// hunkRange: a hunk header's `a[,b]` at i: the count b (1 when it is left out) and its end;
+// not ok when a or b is not such a number.
+func hunkRange(s string, i int) (count, end int, ok bool) {
+	if _, j, ok := hunkNum(s, i); ok {
+		i = j
+	} else {
+		return 0, 0, false
+	}
+	count = 1
+	if i < len(s) && s[i] == ',' {
+		i++
+		n, j, ok := hunkNum(s, i)
+		if !ok {
+			return 0, 0, false
+		}
+		count, i = n, j
+	}
+	return count, i, true
+}
+
+// hunkNum: a number of at most 18 ASCII digits at i, with no digit after it: its value and end.
+func hunkNum(s string, i int) (n, end int, ok bool) {
+	j := i
+	for j < len(s) && IsDigitASCII(s[j]) && j-i < 18 {
+		j++
+	}
+	if j == i || (j < len(s) && IsDigitASCII(s[j])) {
+		return 0, i, false
+	}
+	n, err := strconv.Atoi(s[i:j])
+	return n, j, err == nil
 }

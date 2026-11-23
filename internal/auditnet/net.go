@@ -15,44 +15,59 @@ import (
 func NetHits(readings []*reading.Reading, d *denylist.List) map[string]bool {
 	found := map[string]bool{}
 	for _, r := range readings {
-		s := r.Text
-		if !found["secret:token-format"] && netToken(s) {
-			found["secret:token-format"] = true
-		}
-		if !found["secret:token-format"] && netTokenRemnant(s) {
-			found["secret:token-format"] = true
-		}
-		if !found["secret:jwt"] && netJWTRemnant(s) {
-			found["secret:jwt"] = true
-		}
-		if !found["secret:header"] && netCookie(s) {
-			found["secret:header"] = true
-		}
-		if !found["secret:colon-value"] && netNamedValue(s) {
-			found["secret:colon-value"] = true
-		}
+		netTextHits(found, r.Text)
 		if r.Joined {
 			continue // words either side of an escaped line break run together: no runs, shapes or options here
 		}
-		if !found["secret:flag-value"] && netProgramOption(s) {
-			found["secret:flag-value"] = true
-		}
-		if !found["secret:long-run"] && netLongRun(s) {
-			found["secret:long-run"] = true
-		}
-		if !found["email"] && netEmail(s) {
-			found["email"] = true
-		}
-		if !r.Pctd && !found["phone"] && netPhone(s) {
-			found["phone"] = true
-		}
-		if d != nil {
-			for _, id := range d.Identities {
-				if !found[id.Rule] && netIdentity(id, s) {
-					found[id.Rule] = true
-				}
+		netApartHits(found, r, d)
+	}
+	return found
+}
+
+// netTextHits: the rules the net finds in any reading's text s, joined or not: token formats
+// and their remnants, a JWT's remnant, a cookie and a named value.
+func netTextHits(found map[string]bool, s string) {
+	if !found["secret:token-format"] && netToken(s) {
+		found["secret:token-format"] = true
+	}
+	if !found["secret:token-format"] && netTokenRemnant(s) {
+		found["secret:token-format"] = true
+	}
+	if !found["secret:jwt"] && netJWTRemnant(s) {
+		found["secret:jwt"] = true
+	}
+	if !found["secret:header"] && netCookie(s) {
+		found["secret:header"] = true
+	}
+	if !found["secret:colon-value"] && netNamedValue(s) {
+		found["secret:colon-value"] = true
+	}
+}
+
+// netApartHits: the rules the net finds only in a reading r that is not joined: a program's
+// option, a Bearer word, a long run, an email, a phone (not percent-decoded) and d's identities.
+func netApartHits(found map[string]bool, r *reading.Reading, d *denylist.List) {
+	s := r.Text
+	if !found["secret:flag-value"] && netProgramOption(s) {
+		found["secret:flag-value"] = true
+	}
+	if !found["secret:header"] && netBearerWord(s) {
+		found["secret:header"] = true
+	}
+	if !found["secret:long-run"] && netLongRun(s) {
+		found["secret:long-run"] = true
+	}
+	if !found["email"] && netEmail(s) {
+		found["email"] = true
+	}
+	if !r.Pctd && !found["phone"] && netPhone(s) {
+		found["phone"] = true
+	}
+	if d != nil {
+		for _, id := range d.Identities {
+			if !found[id.Rule] && netIdentity(id, s) {
+				found[id.Rule] = true
 			}
 		}
 	}
-	return found
 }

@@ -35,48 +35,68 @@ func (c *Scan) sql() {
 		if v >= len(s) {
 			continue
 		}
-		j := v
-		if s[j] == 'E' || s[j] == 'e' || s[j] == 'N' || s[j] == 'n' {
-			if j+1 < len(s) && s[j+1] == '\'' {
-				j++
-			}
-		}
-		switch {
-		case s[j] == '\'' || s[j] == '"':
-			q := s[j]
-			k := j + 1
-			for k < len(s) && s[k] != '\n' {
-				if s[k] == q {
-					if k+1 < len(s) && s[k+1] == q {
-						k += 2
-						continue
-					}
-					break
-				}
-				k++
-			}
-			if k < len(s) && s[k] == q && k > j+1 {
-				c.hideValue(j+1, k)
-			}
-		case strings.HasPrefix(s[j:], "$$"):
-			k := strings.Index(s[j+2:lex.LineEnd(s, j+2)], "$$")
-			if k > 0 {
-				c.hideValue(j+2, j+2+k)
-			}
-		}
+		c.sqlValueAt(v)
 	}
 	for _, m := range IdentifiedByRx.FindAllStringIndex(s, -1) {
-		v := m[1]
-		up := strings.ToUpper(s[v:])
-		if (strings.HasPrefix(up, "VALUES") && !lex.IsWordAt(s, v+6)) || (strings.HasPrefix(up, "PASSWORD") && !lex.IsWordAt(s, v+8)) {
-			continue
-		}
-		e := v
-		for e < len(s) && !lex.IsSpaceByte(s[e]) && strings.IndexByte(";'\"$", s[e]) < 0 {
-			e++
-		}
-		c.hideValue(v, e)
+		c.identifiedByValueAt(m[1])
 	}
+}
+
+// sqlValueAt: the value after a SQL key at v: the non-empty body of a quoted string (`'...'`,
+// `"..."`, `E'...'`, `N'...'`) or of a dollar-quoted one, closed on its line.
+func (c *Scan) sqlValueAt(v int) {
+	s := c.S
+	j := v
+	if s[j] == 'E' || s[j] == 'e' || s[j] == 'N' || s[j] == 'n' {
+		if j+1 < len(s) && s[j+1] == '\'' {
+			j++
+		}
+	}
+	switch {
+	case s[j] == '\'' || s[j] == '"':
+		q := s[j]
+		k := sqlQuoteEnd(s, j, q)
+		if k < len(s) && s[k] == q && k > j+1 {
+			c.hideValue(j+1, k)
+		}
+	case strings.HasPrefix(s[j:], "$$"):
+		k := strings.Index(s[j+2:lex.LineEnd(s, j+2)], "$$")
+		if k > 0 {
+			c.hideValue(j+2, j+2+k)
+		}
+	}
+}
+
+// sqlQuoteEnd: the closing quote q of the string opened at j, a doubled q read as one, or
+// where its line ends.
+func sqlQuoteEnd(s string, j int, q byte) int {
+	k := j + 1
+	for k < len(s) && s[k] != '\n' {
+		if s[k] == q {
+			if k+1 < len(s) && s[k+1] == q {
+				k += 2
+				continue
+			}
+			break
+		}
+		k++
+	}
+	return k
+}
+
+// identifiedByValueAt: the bare word after an `IDENTIFIED BY` that ends at v, unless it is the
+// word `VALUES` or `PASSWORD`.
+func (c *Scan) identifiedByValueAt(v int) {
+	s := c.S
+	up := strings.ToUpper(s[v:])
+	if (strings.HasPrefix(up, "VALUES") && !lex.IsWordAt(s, v+6)) || (strings.HasPrefix(up, "PASSWORD") && !lex.IsWordAt(s, v+8)) {
+		return
+	}
+	e := v
+	for e < len(s) && !lex.IsSpaceByte(s[e]) && strings.IndexByte(";'\"$", s[e]) < 0 {
+		e++
+	}
+	c.hideValue(v, e)
 }
 
 var blockHeadRx = regexp.MustCompile(`(?im)^([+-]?)([ \t]*)(?:-[ \t]+)?["']?([A-Za-z0-9_-]+)["']?[ \t]*:[ \t]*(?:[!&]\S*[ \t]+)*[|>][-+0-9]*[ \t]*(?:#[^\r\n]*)?\r?\n`)
@@ -97,26 +117,32 @@ func (c *Scan) blockScalars() {
 		}
 		line := s[h[0]:h[1]][len(marker):]
 		depth := len(line) - len(strings.TrimLeft(line, " \t"))
-		end := pos
-		for pos < len(s) {
-			le := lex.LineEnd(s, pos)
-			ln := strings.TrimRight(s[pos:le], "\r")
-			if marker != "" && !strings.HasPrefix(ln, marker) {
-				break
-			}
-			body := ln[len(marker):]
-			if strings.TrimSpace(body) != "" {
-				if len(body)-len(strings.TrimLeft(body, " \t")) <= depth {
-					break
-				}
-				end = le
-			}
-			pos = le + 1
-		}
-		if end > h[1] {
+		if end := blockScalarEnd(s, pos, marker, depth); end > h[1] {
 			c.hideValue(h[1], end)
 		}
 	}
+}
+
+// blockScalarEnd: the end of the last non-blank line, from pos on, of a block scalar whose
+// lines carry marker and sit deeper than depth; pos when there is none.
+func blockScalarEnd(s string, pos int, marker string, depth int) int {
+	end := pos
+	for pos < len(s) {
+		le := lex.LineEnd(s, pos)
+		ln := strings.TrimRight(s[pos:le], "\r")
+		if marker != "" && !strings.HasPrefix(ln, marker) {
+			break
+		}
+		body := ln[len(marker):]
+		if strings.TrimSpace(body) != "" {
+			if len(body)-len(strings.TrimLeft(body, " \t")) <= depth {
+				break
+			}
+			end = le
+		}
+		pos = le + 1
+	}
+	return end
 }
 
 func hasWordChar(s string) bool {

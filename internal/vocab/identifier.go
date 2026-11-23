@@ -55,8 +55,21 @@ func IsIdentifier(run string) bool {
 			return false
 		}
 	}
-	mixed := 0
-	longest := false
+	mixed, longest, ok := identPartsFit(parts)
+	if !ok {
+		return false
+	}
+	if mixed > maxIdentMixedParts || !longest {
+		return false
+	}
+	return identPronounceable(run)
+}
+
+// identPartsFit: how many parts mix letters and digits, and whether one word is long enough
+// (longest); ok false when a part is longer than its kind allows.
+func identPartsFit(parts []string) (mixed int, longest, ok bool) {
+	mixed = 0
+	longest = false
 	for _, part := range parts {
 		var limit int
 		switch {
@@ -74,12 +87,14 @@ func IsIdentifier(run string) bool {
 			}
 		}
 		if len(part) > limit {
-			return false
+			return 0, false, false
 		}
 	}
-	if mixed > maxIdentMixedParts || !longest {
-		return false
-	}
+	return mixed, longest, true
+}
+
+// identPronounceable: no run of consonants longer than allowed, and enough vowels among the letters.
+func identPronounceable(run string) bool {
 	runLen := 0
 	letters, vowels := 0, 0
 	for i := 0; i < len(run); i++ {

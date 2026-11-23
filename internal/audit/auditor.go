@@ -78,83 +78,100 @@ func (a *auditor) heredocValues() {
 }
 
 // assignments: any name, `=`, a value.
-func (a *auditor) assignments() {
+func (a *auditor) assignments() { eachByte(a.s, '=', a.assignmentAt) }
+
+// eachByte calls at with every index of c in s, in order.
+func eachByte(s string, c byte, at func(int)) {
+	for p := strings.IndexByte(s, c); p >= 0; p = lex.NextByte(s, c, p+1) {
+		at(p)
+	}
+}
+
+// assignmentAt: the `=` at p, with the name before it and the value after it.
+func (a *auditor) assignmentAt(p int) {
 	s := a.s
-	for p := strings.IndexByte(s, '='); p >= 0; p = lex.NextByte(s, '=', p+1) {
-		q := lex.NameRunBefore(s, p)
-		var name string
-		switch {
-		case q < p:
-			name = lex.TrimDashes(s[q:p])
-		case p > 0 && (s[p-1] == '"' || s[p-1] == '\''):
-			e := p - 1
-			for e > 0 && s[e-1] == '\\' {
-				e--
-			}
-			q2 := lex.NameRunBefore(s, e)
-			if q2 == e {
-				continue
-			}
-			name = lex.TrimDashes(s[q2:e])
-		case p > 0 && (s[p-1] == ' ' || s[p-1] == '\t'):
-			// Code's `name = value`: a value that holds a placeholder and more (`<redacted>[0]`,
-			// `<redacted>/`) is a value partly sent, as a receiver splits it at a space or quote.
-			a.spacedAssignment(p)
-			continue
-		default:
-			continue
+	q := lex.NameRunBefore(s, p)
+	var name string
+	switch {
+	case q < p:
+		name = lex.TrimDashes(s[q:p])
+	case p > 0 && (s[p-1] == '"' || s[p-1] == '\''):
+		e := p - 1
+		for e > 0 && s[e-1] == '\\' {
+			e--
 		}
-		if name == "" {
-			continue
+		q2 := lex.NameRunBefore(s, e)
+		if q2 == e {
+			return
 		}
-		// As a receiver splits `NAME=` from what follows: a quoted string from the `=` on, or a
-		// run to a space or quote. Anything there but `<redacted>` is a value, `;`, `)` and a
-		// placeholder with a closer glued to it too: an empty assignment (`NAME=;`) is refused
-		// rather than judged.
-		if q < p && vocab.IsCredentialName(name) {
-			if e := receiverValueEnd(s, p+1); strings.Trim(s[p+1:e], "\"'") != "" && strings.Trim(s[p+1:e], "\"'") != lex.PhRedacted {
-				a.hitAt("secret:named-value", p+1, e)
-			} else if e == p+1 {
-				// Nothing glued to `NAME=`: the receiver reads on past blanks and line breaks to a quoted string,
-				// which is the value when the scrubber hid part of it (`NAME=` then `"echo <redacted>"`).
-				w := p + 1
-				for w < len(s) && lex.IsSpaceByte(s[w]) {
-					w++
-				}
-				if w > p+1 && w < len(s) && (s[w] == '"' || s[w] == '\'') {
-					e := receiverValueEnd(s, w)
-					if v := strings.Trim(s[w:e], "\"'"); strings.Contains(v, "<redacted") && v != lex.PhRedacted {
-						a.hitAt("secret:named-value", w, e)
-					}
-				}
+		name = lex.TrimDashes(s[q2:e])
+	case p > 0 && (s[p-1] == ' ' || s[p-1] == '\t'):
+		// Code's `name = value`: a value that holds a placeholder and more (`<redacted>[0]`,
+		// `<redacted>/`) is a value partly sent, as a receiver splits it at a space or quote.
+		a.spacedAssignment(p)
+		return
+	default:
+		return
+	}
+	if name == "" {
+		return
+	}
+	if q < p && vocab.IsCredentialName(name) {
+		a.receiverValue(p)
+	}
+	vlo, vhi := assignmentValue(s, q, p)
+	v := s[vlo:vhi]
+	if !live(v) {
+		return
+	}
+	if vocab.IsCredentialName(name) || (detect.HasKeyword(name) && vocab.LooksSecret(v)) {
+		a.hitAt("secret:named-value", vlo, vhi)
+	}
+}
+
+// receiverValue: a credential's `NAME=` at p, as a receiver splits `NAME=` from what follows: a quoted string
+// from the `=` on, or a run to a space or quote. Anything there but `<redacted>` is a value, `;`, `)` and a
+// placeholder with a closer glued to it too: an empty assignment (`NAME=;`) is refused rather than judged.
+func (a *auditor) receiverValue(p int) {
+	s := a.s
+	if e := receiverValueEnd(s, p+1); strings.Trim(s[p+1:e], "\"'") != "" && strings.Trim(s[p+1:e], "\"'") != lex.PhRedacted {
+		a.hitAt("secret:named-value", p+1, e)
+	} else if e == p+1 {
+		// Nothing glued to `NAME=`: the receiver reads on past blanks and line breaks to a quoted string,
+		// which is the value when the scrubber hid part of it (`NAME=` then `"echo <redacted>"`).
+		w := p + 1
+		for w < len(s) && lex.IsSpaceByte(s[w]) {
+			w++
+		}
+		if w > p+1 && w < len(s) && (s[w] == '"' || s[w] == '\'') {
+			e := receiverValueEnd(s, w)
+			if v := strings.Trim(s[w:e], "\"'"); strings.Contains(v, "<redacted") && v != lex.PhRedacted {
+				a.hitAt("secret:named-value", w, e)
 			}
-		}
-		lo, hi := schemeValue(s, p+1)
-		v := s[lo:hi]
-		vlo, vhi := lo, hi
-		// A quoted word that opens with the assignment holds its value to the closing quote.
-		if q < p {
-			k := q
-			for k < p && s[k] == '-' {
-				k++
-			}
-			if q > 0 && (s[q-1] == '"' || s[q-1] == '\'') {
-				qc := s[q-1]
-				e := p + 1
-				for e < len(s) && s[e] != qc && s[e] != '\n' {
-					e++
-				}
-				v = s[p+1 : e]
-				vlo, vhi = p+1, e
-			}
-		}
-		if !live(v) {
-			continue
-		}
-		if vocab.IsCredentialName(name) || (detect.HasKeyword(name) && vocab.LooksSecret(v)) {
-			a.hitAt("secret:named-value", vlo, vhi)
 		}
 	}
+}
+
+// assignmentValue: the span of the value after the `=` at p whose name starts at q. A quoted word that opens
+// with the assignment holds its value to the closing quote.
+func assignmentValue(s string, q, p int) (int, int) {
+	lo, hi := schemeValue(s, p+1)
+	vlo, vhi := lo, hi
+	if q < p {
+		k := q
+		for k < p && s[k] == '-' {
+			k++
+		}
+		if q > 0 && (s[q-1] == '"' || s[q-1] == '\'') {
+			qc := s[q-1]
+			e := p + 1
+			for e < len(s) && s[e] != qc && s[e] != '\n' {
+				e++
+			}
+			vlo, vhi = p+1, e
+		}
+	}
+	return vlo, vhi
 }
 
 // spacedAssignment: `name = value` at the `=` at p, judged only when the value opens with a placeholder and more
@@ -185,100 +202,135 @@ func (a *auditor) spacedAssignment(p int) {
 }
 
 // colons: `"name": value` anywhere, `name: value` first on a line or after `{` `,`.
-func (a *auditor) colons() {
+func (a *auditor) colons() { eachByte(a.s, ':', a.colonAt) }
+
+// colonAt: the colon at p, with the name before it and the value after it.
+func (a *auditor) colonAt(p int) {
 	s := a.s
-	for p := strings.IndexByte(s, ':'); p >= 0; p = lex.NextByte(s, ':', p+1) {
-		e := p
-		for e > 0 && lex.IsSpaceByte(s[e-1]) {
-			e--
+	ne, quoted := colonNameEnd(s, p)
+	q := lex.NameRunBefore(s, ne)
+	if q == ne {
+		return
+	}
+	name := lex.TrimDashes(s[q:ne])
+	v := lex.SkipSpaceConts(s, p+1)
+	if quoted && q > 0 && (s[q-1] == '"' || s[q-1] == '\'') {
+		a.jsonField(name, v)
+		return
+	}
+	if !vocab.IsCredentialName(name) {
+		return
+	}
+	if v < len(s) && s[v] == '[' && !a.pct && arrayLive(s, v) {
+		a.hitAt("secret:json-field", v+1, arrayBodyEnd(s, v))
+	}
+	head, flow := colonPlace(s, q)
+	if !head && !flow {
+		return
+	}
+	if head && lex.LDIFBase64Colon(s, p) {
+		p++
+	}
+	w := lex.SkipBlanks(s, p+1)
+	if head && !flow && w == p+1 {
+		return
+	}
+	a.colonValue(name, w, flow)
+}
+
+// colonNameEnd: where the name before the colon at p ends, past blanks, and whether a quote closes it (then
+// past the quote and the escapes before it).
+func colonNameEnd(s string, p int) (int, bool) {
+	e := p
+	for e > 0 && lex.IsSpaceByte(s[e-1]) {
+		e--
+	}
+	quoted := e > 0 && (s[e-1] == '"' || s[e-1] == '\'')
+	ne := e
+	if quoted {
+		ne = e - 1
+		for ne > 0 && s[ne-1] == '\\' {
+			ne--
 		}
-		quoted := e > 0 && (s[e-1] == '"' || s[e-1] == '\'')
-		ne := e
-		if quoted {
-			ne = e - 1
-			for ne > 0 && s[ne-1] == '\\' {
-				ne--
-			}
+	}
+	return ne, quoted
+}
+
+// jsonField: a quoted name's value at v, a quoted string or an array.
+func (a *auditor) jsonField(name string, v int) {
+	s := a.s
+	if v < len(s) && (s[v] == '"' || s[v] == '\'') {
+		lo, hi := v, a.r.QuotedEnd(s, v, func(s string, i int) int { _, e := lex.CrudeValue(s, i); return e })
+		val := s[lo:hi]
+		// The value to its quote: anything but `<redacted>` is a value (a placeholder and a
+		// blank too), as Python's audit reads a field.
+		inner := strings.TrimRight(s[lo+1:hi], s[lo:lo+1])
+		if inner != "" && inner != lex.PhRedacted && (vocab.IsCredentialName(name) || (detect.HasKeyword(name) && looksSecretOrFirstWord(val))) {
+			a.hitAt("secret:json-field", lo, hi)
 		}
-		q := lex.NameRunBefore(s, ne)
-		if q == ne {
-			continue
-		}
-		name := lex.TrimDashes(s[q:ne])
-		v := lex.SkipSpaceConts(s, p+1)
-		if quoted && q > 0 && (s[q-1] == '"' || s[q-1] == '\'') {
-			if v < len(s) && (s[v] == '"' || s[v] == '\'') {
-				lo, hi := v, a.r.QuotedEnd(s, v, func(s string, i int) int { _, e := lex.CrudeValue(s, i); return e })
-				val := s[lo:hi]
-				// The value to its quote: anything but `<redacted>` is a value (a placeholder and a
-				// blank too), as Python's audit reads a field.
-				inner := strings.TrimRight(s[lo+1:hi], s[lo:lo+1])
-				if inner != "" && inner != lex.PhRedacted && (vocab.IsCredentialName(name) || (detect.HasKeyword(name) && looksSecretOrFirstWord(val))) {
-					a.hitAt("secret:json-field", lo, hi)
-				}
-			}
-			if v < len(s) && s[v] == '[' && !a.pct && vocab.IsCredentialName(name) && arrayLive(s, v) {
-				a.hitAt("secret:json-field", v+1, arrayBodyEnd(s, v))
-			}
-			continue
-		}
-		if !vocab.IsCredentialName(name) {
-			continue
-		}
-		if v < len(s) && s[v] == '[' && !a.pct && arrayLive(s, v) {
-			a.hitAt("secret:json-field", v+1, arrayBodyEnd(s, v))
-		}
-		ls := lex.LineStart(s, q)
-		head := strings.Trim(s[ls:q], " \t+-") == ""
-		j := q
-		for j > 0 && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '+' || s[j-1] == '-') {
-			j--
-		}
-		flow := j > 0 && (s[j-1] == '{' || s[j-1] == ',')
-		if !head && !flow {
-			continue
-		}
-		w := lex.SkipBlanks(s, p+1)
-		if head && !flow && w == p+1 {
-			continue
-		}
-		if w >= len(s) || s[w] == '{' || detect.IsTypeWord(s, w) {
-			continue
-		}
-		if detect.IsBlockIndicator(s, w) {
-			if !a.pct && blockLive(s, w) {
-				a.hit("secret:colon-value")
-			}
-			continue
-		}
-		// A known header's value in an object literal runs to the line end (its own `, k=v`).
-		if flow && isFixedHeader(name) {
-			if le := detect.ContLineEnd(s, w); live(s[w:le]) {
-				a.hitAt("secret:colon-value", w, le)
-			}
-			continue
-		}
-		// a value, then every word after a blank that is not a stop word
-		end := auditWordEnd(s, w, true)
-		for {
-			k := lex.SkipBlanks(s, end)
-			if k == end || k >= len(s) || detect.ColonStop(s, k) {
-				break
-			}
-			e2 := auditWordEnd(s, k, false)
-			if e2 == k {
-				break
-			}
-			end = e2
-		}
-		if live(s[w:end]) {
-			a.hitAt("secret:colon-value", w, end)
-		}
+	}
+	if v < len(s) && s[v] == '[' && !a.pct && vocab.IsCredentialName(name) && arrayLive(s, v) {
+		a.hitAt("secret:json-field", v+1, arrayBodyEnd(s, v))
 	}
 }
 
-// auditWordEnd: `"..."?`, `'...'?`, or a run without a space, quote or `,` `;` `}` `]`; the
-// first word may be an auth scheme and the word after it.
+// colonPlace: whether the name at q stands first on its line (head) or after `{` or `,` (flow), past blanks
+// and diff markers.
+func colonPlace(s string, q int) (bool, bool) {
+	ls := lex.LineStart(s, q)
+	head := strings.Trim(s[ls:q], " \t+-") == ""
+	j := q
+	for j > 0 && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '+' || s[j-1] == '-') {
+		j--
+	}
+	flow := j > 0 && (s[j-1] == '{' || s[j-1] == ',')
+	return head, flow
+}
+
+// colonValue: a credential's colon value at w, after an unquoted name.
+func (a *auditor) colonValue(name string, w int, flow bool) {
+	s := a.s
+	if w >= len(s) || s[w] == '{' && lex.SchemeTagEnd(s, w) < 0 || detect.IsTypeWord(s, w) {
+		return
+	}
+	if detect.IsBlockIndicator(s, w) {
+		if !a.pct && blockLive(s, w) {
+			a.hit("secret:colon-value")
+		}
+		return
+	}
+	// A known header's value in an object literal runs to the line end (its own `, k=v`).
+	if flow && isFixedHeader(name) {
+		if le := detect.ContLineEnd(s, w); live(s[w:le]) {
+			a.hitAt("secret:colon-value", w, le)
+		}
+		return
+	}
+	end := colonValueEnd(s, w)
+	if live(s[w:end]) {
+		a.hitAt("secret:colon-value", w, end)
+	}
+}
+
+// colonValueEnd: where a colon value at w ends: a value, then every word after a blank that is not a stop word.
+func colonValueEnd(s string, w int) int {
+	end := auditWordEnd(s, w, true)
+	for {
+		k := lex.SkipBlanks(s, end)
+		if k == end || k >= len(s) || detect.ColonStop(s, k) {
+			break
+		}
+		e2 := auditWordEnd(s, k, false)
+		if e2 == k {
+			break
+		}
+		end = e2
+	}
+	return end
+}
+
+// auditWordEnd: `"..."?`, `'...'?`, or a run without a space, quote or `,` `;` `}` `]` past a scheme tag (`{SSHA}`);
+// the first word may be an auth scheme and the word after it.
 func auditWordEnd(s string, i int, first bool) int {
 	if i >= len(s) {
 		return i
@@ -287,7 +339,7 @@ func auditWordEnd(s string, i int, first bool) int {
 		_, e := lex.CrudeValue(s, i)
 		return e
 	}
-	j := i
+	j := max(i, lex.SchemeTagEnd(s, i))
 	for j < len(s) && !lex.IsSpaceByte(s[j]) && strings.IndexByte("\"',;}]", s[j]) < 0 {
 		j++
 	}

@@ -96,30 +96,39 @@ func notCompareEq(s string, i int) bool { return i >= len(s) || s[i] != '=' }
 func typedOp(s string, k int, goType bool) int {
 	j := lex.SkipBlanks(s, k)
 	if j < len(s) && s[j] == ':' {
-		t := lex.SkipBlanks(s, j+1)
-		if t < len(s) && (s[t] == '"' || s[t] == '\'') {
-			t++
-		}
-		if e := typeNameEnd(s, t, false); e > t {
-			if e < len(s) && (s[e] == '"' || s[e] == '\'') {
-				e++
-			}
-			e = subscriptEnd(s, e)
-			o := lex.SkipBlanks(s, e)
-			if o < len(s) && s[o] == '=' && notCompare(s, o+1) {
-				return o + 1
-			}
-		}
-		return -1
+		return annotatedOp(s, j)
 	}
 	if goType && j > k {
 		if e := typeNameEnd(s, j, true); e > j {
-			e = subscriptEnd(s, e)
-			o := lex.SkipBlanks(s, e)
-			if o < len(s) && s[o] == '=' && notCompare(s, o+1) {
-				return o + 1
-			}
+			return assignAfterType(s, e)
 		}
+	}
+	return -1
+}
+
+// annotatedOp: just past the `=` after a type annotation whose colon is at j (`name: Type =`,
+// the type perhaps quoted); -1 when no type or no assignment follows.
+func annotatedOp(s string, j int) int {
+	t := lex.SkipBlanks(s, j+1)
+	if t < len(s) && (s[t] == '"' || s[t] == '\'') {
+		t++
+	}
+	if e := typeNameEnd(s, t, false); e > t {
+		if e < len(s) && (s[e] == '"' || s[e] == '\'') {
+			e++
+		}
+		return assignAfterType(s, e)
+	}
+	return -1
+}
+
+// assignAfterType: just past an `=` (not a comparison) after a type that ends at e, perhaps
+// subscripted; -1 when none follows.
+func assignAfterType(s string, e int) int {
+	e = subscriptEnd(s, e)
+	o := lex.SkipBlanks(s, e)
+	if o < len(s) && s[o] == '=' && notCompare(s, o+1) {
+		return o + 1
 	}
 	return -1
 }
@@ -161,10 +170,10 @@ func subscriptEnd(s string, i int) int {
 }
 
 // openers: `(` or `{` after the operator, each perhaps followed by a line break and an
-// indented next line.
+// indented next line. A scheme tag's `{` (`{SSHA}…`) opens the value, not a block.
 func OpenersEnd(s string, i int) int {
 	j := i
-	for j < len(s) && (s[j] == '(' || s[j] == '{') {
+	for j < len(s) && (s[j] == '(' || s[j] == '{' && lex.SchemeTagEnd(s, j) < 0) {
 		j = lex.SkipBlanks(s, j+1)
 		k := j
 		if k < len(s) && s[k] == '\r' {
