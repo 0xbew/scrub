@@ -32,40 +32,25 @@ func parseDiff(s string, lines []lex.DiffLine, wasCut bool) (parts []diffPart, o
 	for li, ln := range lines {
 		body := s[ln.Start:ln.Body]
 		if oldN > 0 || newN > 0 {
-			marker := ""
-			if body != "" {
-				marker = body[:1]
-			}
-			switch {
-			case marker == "+" && newN > 0:
-				newN--
-			case marker == "-" && oldN > 0:
-				oldN--
-			case (marker == " " || marker == "") && oldN > 0 && newN > 0:
-				oldN--
-				newN--
-			case marker == "\\":
-			default:
+			var rowOK bool
+			if oldN, newN, rowOK = hunkRowCounts(body, oldN, newN); !rowOK {
 				return nil, false
 			}
 			cur.rows = append(cur.rows, li)
 			continue
 		}
-		if strings.HasPrefix(body, "\\") && cur != nil && len(between) == 0 {
+		if noNewlineRow(body, cur, between) {
 			cur.rows = append(cur.rows, li)
 			continue
 		}
 		if o, n, e, isHunk := lex.HunkHeader(body); isHunk {
-			if len(between) > 0 {
-				parts = append(parts, diffPart{text: between})
-				between = nil
-			}
+			parts, between = withText(parts, between), nil
 			oldN, newN = o, n
 			cur = &hunk{header: ln, headerEnd: ln.Start + e}
 			parts = append(parts, diffPart{hunk: cur})
 			continue
 		}
-		if body != "" && strings.IndexByte("+- ", body[0]) >= 0 && !strings.HasPrefix(body, "--- ") && !strings.HasPrefix(body, "+++ ") {
+		if strayRow(body) {
 			return nil, false
 		}
 		between = append(between, li)
@@ -73,10 +58,26 @@ func parseDiff(s string, lines []lex.DiffLine, wasCut bool) (parts []diffPart, o
 	if (oldN > 0 || newN > 0) && !wasCut {
 		return nil, false
 	}
+	return withText(parts, between), true
+}
+
+// withText: parts with the text between hunks appended as its own part, when there is any.
+func withText(parts []diffPart, between []int) []diffPart {
 	if len(between) > 0 {
 		parts = append(parts, diffPart{text: between})
 	}
-	return parts, true
+	return parts
+}
+
+// noNewlineRow: a `\` row (`\ No newline at end of file`) right after a hunk's rows, which belongs to that hunk.
+func noNewlineRow(body string, cur *hunk, between []int) bool {
+	return strings.HasPrefix(body, "\\") && cur != nil && len(between) == 0
+}
+
+// strayRow: a line outside any hunk that reads as a diff row (`+`, `-` or ` ` first), other than a
+// `--- ` or `+++ ` file header.
+func strayRow(body string) bool {
+	return body != "" && strings.IndexByte("+- ", body[0]) >= 0 && !strings.HasPrefix(body, "--- ") && !strings.HasPrefix(body, "+++ ")
 }
 
 // sideReading: the rows' contents after their markers, with their line endings, as one
@@ -175,6 +176,28 @@ func sides(s string, lines []lex.DiffLine, rows []int, d *denylist.List, out *sp
 	}
 }
 
+// hunkRowCounts: the old and new rows a hunk still promises after the row body; false when
+// its marker breaks the promise.
+func hunkRowCounts(body string, oldN, newN int) (int, int, bool) {
+	marker := ""
+	if body != "" {
+		marker = body[:1]
+	}
+	switch {
+	case marker == "+" && newN > 0:
+		newN--
+	case marker == "-" && oldN > 0:
+		oldN--
+	case (marker == " " || marker == "") && oldN > 0 && newN > 0:
+		oldN--
+		newN--
+	case marker == "\\":
+	default:
+		return 0, 0, false
+	}
+	return oldN, newN, true
+}
+
 // diffSpans: the hidden spans of a diff text, markers and line breaks never among them.
 func diffSpans(window string, d *denylist.List, wasCut bool) *span.Set {
 	lines := lex.DiffLines(window)
@@ -195,42 +218,63 @@ func diffSpans(window string, d *denylist.List, wasCut bool) *span.Set {
 			}
 			h := p.hunk
 			// The ranges are digits; after them git repeats a line of the file.
-			rest := &reading.Reading{Text: window[h.headerEnd:h.header.Body], Src: window}
-			for i := h.headerEnd; i < h.header.Body; i++ {
-				rest.Lo = append(rest.Lo, int32(i))
-				rest.Hi = append(rest.Hi, int32(i+1))
-			}
-			detectAll(rest, d, modeScrub, out)
-			var rows, slashes []int
-			for _, li := range h.rows {
-				if strings.HasPrefix(window[lines[li].Start:lines[li].Body], "\\") {
-					slashes = append(slashes, li)
-					continue
-				}
-				rows = append(rows, li)
-				if lines[li].Body > lines[li].Start {
-					protect[lines[li].Start] = true
-				}
-			}
+			detectAll(hunkHeaderRest(window, h), d, modeScrub, out)
+			rows, slashes := hunkRows(window, lines, h, protect)
 			sides(window, lines, rows, d, out)
-			// Addresses as the rows are written too: a diff quoting a diff holds ` +@pytest.mark.x`, which the
-			// receiver (Python's audit) reads as an address though its side starts the line with it.
-			for _, li := range rows {
-				ln := lines[li]
-				if ln.Body > ln.Start+1 {
-					detect.Emails(window[ln.Start:ln.Body], func(lo, hi int) {
-						if lo == 0 {
-							lo = 1 // never the row's marker
-						}
-						out.Add(ln.Start+lo, ln.Start+hi, span.KindEmail)
-					})
-				}
-			}
+			rowEmails(window, lines, rows, out)
 			for _, li := range slashes {
 				detectAll(chunkReading(window, lines, []int{li}), d, modeScrub, out)
 			}
 		}
 	}
+	return keptOutside(out, protect)
+}
+
+// hunkHeaderRest: the hunk header's text after its ranges, as a reading of window.
+func hunkHeaderRest(window string, h *hunk) *reading.Reading {
+	rest := &reading.Reading{Text: window[h.headerEnd:h.header.Body], Src: window}
+	for i := h.headerEnd; i < h.header.Body; i++ {
+		rest.Lo = append(rest.Lo, int32(i))
+		rest.Hi = append(rest.Hi, int32(i+1))
+	}
+	return rest
+}
+
+// hunkRows: the hunk's rows, its `\ No newline` rows apart (slashes); each row's marker is
+// marked in protect.
+func hunkRows(window string, lines []lex.DiffLine, h *hunk, protect []bool) (rows, slashes []int) {
+	for _, li := range h.rows {
+		if strings.HasPrefix(window[lines[li].Start:lines[li].Body], "\\") {
+			slashes = append(slashes, li)
+			continue
+		}
+		rows = append(rows, li)
+		if lines[li].Body > lines[li].Start {
+			protect[lines[li].Start] = true
+		}
+	}
+	return rows, slashes
+}
+
+// rowEmails: addresses as the rows are written, never the row's marker.
+func rowEmails(window string, lines []lex.DiffLine, rows []int, out *span.Set) {
+	// Addresses as the rows are written too: a diff quoting a diff holds ` +@pytest.mark.x`, which the
+	// receiver (Python's audit) reads as an address though its side starts the line with it.
+	for _, li := range rows {
+		ln := lines[li]
+		if ln.Body > ln.Start+1 {
+			detect.Emails(window[ln.Start:ln.Body], func(lo, hi int) {
+				if lo == 0 {
+					lo = 1 // never the row's marker
+				}
+				out.Add(ln.Start+lo, ln.Start+hi, span.KindEmail)
+			})
+		}
+	}
+}
+
+// keptOutside: the spans of out, cut at every protected byte.
+func keptOutside(out *span.Set, protect []bool) *span.Set {
 	kept := &span.Set{}
 	for _, sp := range out.Spans {
 		lo := sp.Lo
@@ -262,13 +306,20 @@ func scrubDiff(text string, d *denylist.List, limit int) string {
 	return settled(text, func(text string) (string, bool) {
 		length := utf8.RuneCountInString(text)
 		window := firstRunes(text, limit+RedactMargin)
-		wasCut := length > utf8.RuneCountInString(window)
+		wasCut := length > utf8.RuneCountInString(window) || endsCut(text)
 		spans := diffSpans(window, d, wasCut)
 		rendered := renderFixed(window, spans, true, func(t string) *span.Set { return diffSpans(t, d, wasCut) })
 		rows := reshapeRows(rendered)
 		res := cut(rows, limit, length)
 		return res, res != rows
 	})
+}
+
+// endsCut: text is a cut output, so its last hunk may stop short of the rows its header counts. Read
+// otherwise, the settle pass and a receiver's re-scrub read a cut diff the fallback way and hide more
+// than the first pass did.
+func endsCut(text string) bool {
+	return text == Cut || strings.HasSuffix(text, " "+Cut)
 }
 
 // reshapeRows: addresses and phone numbers again on each rendered row, its marker aside.

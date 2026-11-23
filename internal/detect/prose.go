@@ -96,17 +96,26 @@ func valueLike(v string) bool {
 }
 
 // midValue: the value after a credential's name mid-sentence, from v: a quoted string that opens here and closes
-// on its line (its body), else the word to a blank, without the wrapping a writer puts around it (`**x**`,
+// on its line (its body), else the word to a blank (after a quote that never closes), without the wrapping a writer puts around it (`**x**`,
 // “ `x` “, `${x}`, curly quotes) or the punctuation that ends the sentence. A quote that closes a string opened
 // earlier (`"invalid token: " + t`) holds no value. Returns the span to judge and hide, or ok false.
 func midValue(s string, v int) (lo, hi int, ok bool) {
 	le := lex.LineEnd(s, v)
 	if q := s[v]; q == '"' || q == '\'' || q == '`' {
 		k := strings.IndexByte(s[v+1:le], q)
-		if k <= 0 {
+		if k == 0 {
 			return 0, 0, false
 		}
-		return v + 1, v + 1 + k, true
+		if k > 0 {
+			return v + 1, v + 1 + k, true
+		}
+		// A quote that does not close on its line: the word right after it is the value. One that closes a
+		// string opened earlier (`"invalid token: "+t`, `"token: "*(n//2)`) or opens a template (`"{{ .Pw }}`)
+		// holds none.
+		v++
+		if v >= le || lex.IsSpaceByte(s[v]) || strings.IndexByte("+*{<(%)]},;.|&!?", s[v]) >= 0 || s[v] == '$' && isReference(s, v) {
+			return 0, 0, false
+		}
 	}
 	e := v
 	// A written escape (`\n` in a JSON string) ends the word: the next line's text is not the value.
@@ -140,23 +149,15 @@ func midValue(s string, v int) (lo, hi int, ok bool) {
 // (`password:Zk3mQ9`), so a URL's scheme or a time is not read.
 func (c *Scan) midColon(name string, q, p int) {
 	s := c.S
+	q = dottedOwnerStart(s, q)
 	if q > 0 && !(lex.IsSpaceByte(s[q-1]) || strings.IndexByte(";\"'`([<>*", s[q-1]) >= 0) {
 		return
 	}
-	if p+1 >= len(s) {
+	lo, hi, v := midColonValue(s, p)
+	if lo < 0 {
 		return
 	}
 	spaced := s[p+1] == ' ' || s[p+1] == '\t'
-	v := lex.SkipBlanks(s, p+1)
-	// A reference, a format directive or a placeholder (`$TOKEN`, `%{http_code}`, `<redacted>`) is not a value.
-	if v >= len(s) || s[v] == '$' || s[v] == '%' || s[v] == '{' || StartsPlaceholder(s, v) || IsTypeWord(s, v) || IsBlockIndicator(s, v) {
-		return
-	}
-	lo, hi, ok := midValue(s, v)
-	// A placeholder inside the wrapping (`<<redacted>>`) is a value already hidden.
-	if !ok || StartsPlaceholder(s, lo) {
-		return
-	}
 	val := s[lo:hi]
 	if !spaced && (!vocab.IsCredentialName(name) || !strings.ContainsAny(val, "0123456789") || s[v] == '/') {
 		return
@@ -167,6 +168,76 @@ func (c *Scan) midColon(name string, q, p int) {
 		(!strings.ContainsAny(val, "0123456789") || strings.ContainsAny(val, "<>")) {
 		return
 	}
+	c.hideMidValue(name, lo, hi)
+}
+
+// dottedOwnerStart: where the owners before a name at q start (`db.` in `db.password:`, `spring.datasource.`), or q
+// when no `.` stands right before it.
+func dottedOwnerStart(s string, q int) int {
+	for q > 1 && s[q-1] == '.' {
+		o := q - 1
+		for o > 0 && (lex.IsAlnumASCII(s[o-1]) || s[o-1] == '_' || s[o-1] == '-') {
+			o--
+		}
+		if o == q-1 || !isIdentStart(s[o]) || s[o] == '$' {
+			return q
+		}
+		q = o
+	}
+	return q
+}
+
+// isReference: a shell or template reference at v, not a value: `${x}`, `$(cmd)`, `$$`, `$1`, `$5k`, or a variable's
+// name (`$TOKEN`, `$db_pass`, `$myPassword`). A crypt hash (`$2b$12$...`, `$bcrypt-sha256$...`) or a name mixing
+// cases and digits (`$Ab9CDEFgH2`) is a value.
+func isReference(s string, v int) bool {
+	if cryptHeadEnd(s, v) > 0 {
+		return false
+	}
+	j := v + 1
+	if j >= len(s) || s[j] == '{' || s[j] == '(' || s[j] == '$' {
+		return true
+	}
+	upper, lower, digit := false, false, false
+	for ; j < len(s) && (lex.IsAlnumASCII(s[j]) || s[j] == '_'); j++ {
+		upper = upper || lex.IsUpperASCII(s[j])
+		lower = lower || lex.IsLowerASCII(s[j])
+		digit = digit || lex.IsDigitASCII(s[j])
+	}
+	if j < len(s) && (lex.IsWordAt(s, j) || s[j] == '$') {
+		return false
+	}
+	if lex.IsDigitASCII(s[v+1]) {
+		return true
+	}
+	return !upper || !lower || !digit
+}
+
+// midColonValue: the value after the colon at p (lo, hi) and where its first byte is (v); lo is
+// -1 when nothing follows the colon, when what follows is a reference, a format directive, a
+// placeholder, a type or a block indicator, or when no value is read or it is a placeholder.
+func midColonValue(s string, p int) (lo, hi, v int) {
+	if p+1 >= len(s) {
+		return -1, 0, 0
+	}
+	v = lex.SkipBlanks(s, p+1)
+	// A reference, a format directive or a placeholder (`$TOKEN`, `%{http_code}`, `<redacted>`) is not a value.
+	if v >= len(s) || s[v] == '$' && isReference(s, v) || s[v] == '%' || opensObject(s, v) || StartsPlaceholder(s, v) || IsTypeWord(s, v) || IsBlockIndicator(s, v) {
+		return -1, 0, 0
+	}
+	lo, hi, ok := midValue(s, v)
+	// A placeholder inside the wrapping (`<<redacted>>`) is a value already hidden.
+	if !ok || StartsPlaceholder(s, lo) {
+		return -1, 0, 0
+	}
+	return lo, hi, v
+}
+
+// hideMidValue: hides the value s[lo:hi] after a mid-line colon: after a credential's name when
+// it reads as a value, after another name when it is a token word that judged accepts.
+func (c *Scan) hideMidValue(name string, lo, hi int) {
+	s := c.S
+	val := s[lo:hi]
 	if vocab.IsCredentialName(name) {
 		// After a strong name a plain word is the value with a bracket after a blank too (`letmein (old)`): only one
 		// glued to it is a call or an index.

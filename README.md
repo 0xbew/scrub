@@ -133,7 +133,10 @@ A JSON object with a whole-number `version` of 1 or more, `identities` and `vend
 ```
 
 `role` is `owner`, `teammate` or `person`, and names the placeholder. A literal matches case-insensitively,
-with any run of spaces, `.`, `_` or `-` (or none) between its words, and never inside a longer word; a vendor
+with any run of separators, or none, between its words: Unicode spaces, `.`, `_`, any Unicode dash or the minus sign,
+and invisible format characters (a soft hyphen, a zero-width space). A separator written in the literal splits it
+into words too (`Ann-Marie Example` also hides `Ann–Marie Example` and `AnnMarie Example`), and a literal of
+separators alone is an error. A literal never matches inside a longer word; a vendor
 is matched anywhere, inside longer words too (`Box` also hides the middle of `sandbox`), because a vendor name glued into an
 identifier is still the name. `ParseDenylist` accepts the `version` key if
 it equals the version argument. Unknown keys, an empty

@@ -75,26 +75,7 @@ func NameWords(name string) []string {
 		c := name[i]
 		switch {
 		case lex.IsUpperASCII(c):
-			j := i
-			for j < n && lex.IsUpperASCII(name[j]) {
-				j++
-			}
-			if j < n && lex.IsLowerASCII(name[j]) {
-				if j-i >= 2 {
-					out = append(out, name[i:j-1])
-					i = j - 1
-				}
-				// [A-Z]?[a-z]+
-				k := i + 1
-				for k < n && lex.IsLowerASCII(name[k]) {
-					k++
-				}
-				out = append(out, name[i:k])
-				i = k
-				continue
-			}
-			out = append(out, name[i:j])
-			i = j
+			i, out = upperWords(name, i, out)
 		case lex.IsLowerASCII(c):
 			j := i
 			for j < n && lex.IsLowerASCII(name[j]) {
@@ -114,6 +95,33 @@ func NameWords(name string) []string {
 		}
 	}
 	return out
+}
+
+// upperWords: out with the words of the capitals at i appended: an acronym, or one before a
+// capitalised word and that word; and where they end.
+func upperWords(name string, i int, out []string) (int, []string) {
+	n := len(name)
+	j := i
+	for j < n && lex.IsUpperASCII(name[j]) {
+		j++
+	}
+	if j < n && lex.IsLowerASCII(name[j]) {
+		if j-i >= 2 {
+			out = append(out, name[i:j-1])
+			i = j - 1
+		}
+		// [A-Z]?[a-z]+
+		k := i + 1
+		for k < n && lex.IsLowerASCII(name[k]) {
+			k++
+		}
+		out = append(out, name[i:k])
+		i = k
+		return i, out
+	}
+	out = append(out, name[i:j])
+	i = j
+	return i, out
 }
 
 func hasAnySuffix(w string, suffixes []string) bool {
@@ -137,45 +145,73 @@ func IsCredentialName(name string) bool {
 		return false
 	}
 	usage := len(words) > 1 && usageWords[lowered[len(words)-1]]
-	for i, raw := range words {
-		word := lowered[i]
-		if (word == "code" || word == "codes") && i > 0 && codeOwners[lowered[i-1]] {
+	for i := range words {
+		if credentialWordAt(words, lowered, i, usage) {
 			return true
 		}
-		if word == "fa" && i > 0 && lowered[i-1] == "2" {
+	}
+	return false
+}
+
+// credentialWordAt: the name's i-th word (lowered: every word in lower case) makes it a
+// credential's; usage: the name ends in a word of usage, so a bare `tokens` counts them.
+func credentialWordAt(words, lowered []string, i int, usage bool) bool {
+	raw := words[i]
+	word := lowered[i]
+	if (word == "code" || word == "codes") && i > 0 && codeOwners[lowered[i-1]] {
+		return true
+	}
+	if word == "fa" && i > 0 && lowered[i-1] == "2" {
+		return true
+	}
+	if word == "pin" && i == len(words)-1 {
+		return true
+	}
+	counted := tokensCounted(lowered, i, usage)
+	if (credentialWords[word] || hasAnySuffix(word, credentialEndings)) && !counted {
+		return true
+	}
+	if word == "key" || word == "keys" || word == "pass" {
+		if keyOrPassCredential(words, lowered, i, raw) {
 			return true
 		}
-		if word == "pin" && i == len(words)-1 {
-			return true
+	}
+	if word == "pass" && i == len(words)-1 {
+		return true
+	}
+	if strings.HasSuffix(word, "pass") && !passWords[word] {
+		return true
+	}
+	return false
+}
+
+// tokensCounted: the word at i is `tokens` that counts them: after a quantity word, or as the
+// first word of a name of usage.
+func tokensCounted(lowered []string, i int, usage bool) bool {
+	word := lowered[i]
+	counted := false
+	if word == "tokens" {
+		if i > 0 {
+			counted = quantityWords[lowered[i-1]]
+		} else {
+			counted = usage
 		}
-		counted := false
-		if word == "tokens" {
-			if i > 0 {
-				counted = quantityWords[lowered[i-1]]
-			} else {
-				counted = usage
-			}
-		}
-		if (credentialWords[word] || hasAnySuffix(word, credentialEndings)) && !counted {
-			return true
-		}
-		if word == "key" || word == "keys" || word == "pass" {
-			if strings.ToUpper(raw) == raw && strings.ToLower(raw) != raw {
-				return true
-			}
-			if i > 0 && keyOwners[lowered[i-1]] {
-				return true
-			}
-			if len(words) == 1 && word == "pass" {
-				return true
-			}
-		}
-		if word == "pass" && i == len(words)-1 {
-			return true
-		}
-		if strings.HasSuffix(word, "pass") && !passWords[word] {
-			return true
-		}
+	}
+	return counted
+}
+
+// keyOrPassCredential: the `key`, `keys` or `pass` at i (raw as written) is a credential's: in
+// capitals, after a key's owner, or `pass` alone.
+func keyOrPassCredential(words, lowered []string, i int, raw string) bool {
+	word := lowered[i]
+	if strings.ToUpper(raw) == raw && strings.ToLower(raw) != raw {
+		return true
+	}
+	if i > 0 && keyOwners[lowered[i-1]] {
+		return true
+	}
+	if len(words) == 1 && word == "pass" {
+		return true
 	}
 	return false
 }

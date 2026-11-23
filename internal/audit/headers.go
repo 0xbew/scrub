@@ -21,117 +21,143 @@ func (a *auditor) headers() {
 			}
 			f := at + k
 			at = f + 1
-			if f > 0 && (lex.WordBefore(s, f) || s[f-1] == '-') {
-				continue
-			}
-			j := f + len(flag)
-			if j < len(s) && s[j] == '=' {
-				j++
-			} else if e := lex.SkipBlanks(s, j); e > j {
-				j = e
-			} else {
-				continue
-			}
-			var quote byte
-			if j < len(s) && (s[j] == '"' || s[j] == '\'') {
-				quote = s[j]
-				j++
-			}
-			j = lex.SkipBlanks(s, j)
-			for j < len(s) && s[j] == '-' {
-				j++
-			}
-			ne := lex.NameRunAfter(s, j)
-			if ne == j || !vocab.IsCredentialName(s[j:ne]) {
-				continue
-			}
-			c := lex.SkipBlanks(s, ne)
-			if c >= len(s) || s[c] != ':' {
-				continue
-			}
-			v := lex.SkipBlanks(s, c+1)
-			var val string
-			var vlo, vhi int
-			if quote != 0 {
-				// Closed, the value runs to its own closing quote (inside double quotes an escaped one is
-				// the value's); with no closing quote on the line, to the next quote of either kind or
-				// backslash, as a receiver splitting the argument reads it.
-				e := v
-				closed := false
-				for e < len(s) && s[e] != '\n' {
-					if quote == '"' && s[e] == '\\' && e+1 < len(s) {
-						e += 2
-						continue
-					}
-					if s[e] == quote {
-						closed = true
-						break
-					}
-					e++
-				}
-				if e > len(s) {
-					e = len(s)
-				}
-				if !closed {
-					e = v
-					if v < len(s) && (s[v] == '"' || s[v] == '\'') {
-						// A value that opens the other quote is that quoted part (a truncated
-						// `-H 'X-Api-Key:"V"`).
-						_, e = lex.CrudeValue(s, v)
-					} else {
-						for e < len(s) && s[e] != '"' && s[e] != '\'' && s[e] != '\\' && s[e] != '\n' {
-							e++
-						}
-					}
-				}
-				val = s[v:e]
-				vlo, vhi = v, e
-			} else {
-				lo, hi := schemeValue(s, v)
-				val = s[lo:hi]
-				vlo, vhi = lo, hi
-				// Unquoted, the receiver's value runs to a blank: a placeholder with anything glued to it
-				// (`X-Token:<redacted>,`) is a value partly sent.
-				if strings.HasPrefix(val, "<redacted") && val != lex.PhRedacted && !lex.OnlyPlaceholders(val) {
-					a.hitAt("secret:header", vlo, vhi)
-				}
-			}
-			if live(val) {
-				a.hitAt("secret:header", vlo, vhi)
+			a.headerFlagAt(f, flag)
+		}
+	}
+	a.schemeAssignments()
+}
+
+// headerFlagAt: the header flag at f, when the header it passes names a credential and its value is live.
+func (a *auditor) headerFlagAt(f int, flag string) {
+	s := a.s
+	if f > 0 && (lex.WordBefore(s, f) || s[f-1] == '-') {
+		return
+	}
+	j := f + len(flag)
+	if j < len(s) && s[j] == '=' {
+		j++
+	} else if e := lex.SkipBlanks(s, j); e > j {
+		j = e
+	} else {
+		return
+	}
+	var quote byte
+	if j < len(s) && (s[j] == '"' || s[j] == '\'') {
+		quote = s[j]
+		j++
+	}
+	j = lex.SkipBlanks(s, j)
+	for j < len(s) && s[j] == '-' {
+		j++
+	}
+	ne := lex.NameRunAfter(s, j)
+	if ne == j || !vocab.IsCredentialName(s[j:ne]) {
+		return
+	}
+	c := lex.SkipBlanks(s, ne)
+	if c >= len(s) || s[c] != ':' {
+		return
+	}
+	a.headerValueAt(lex.SkipBlanks(s, c+1), quote)
+}
+
+// headerValueAt: a credential header's value at v, inside quote when quote is not 0.
+func (a *auditor) headerValueAt(v int, quote byte) {
+	s := a.s
+	var val string
+	var vlo, vhi int
+	if quote != 0 {
+		e := quotedHeaderValueEnd(s, v, quote)
+		val = s[v:e]
+		vlo, vhi = v, e
+	} else {
+		lo, hi := schemeValue(s, v)
+		val = s[lo:hi]
+		vlo, vhi = lo, hi
+		// Unquoted, the receiver's value runs to a blank: a placeholder with anything glued to it
+		// (`X-Token:<redacted>,`) is a value partly sent.
+		if strings.HasPrefix(val, "<redacted") && val != lex.PhRedacted && !lex.OnlyPlaceholders(val) {
+			a.hitAt("secret:header", vlo, vhi)
+		}
+	}
+	if live(val) {
+		a.hitAt("secret:header", vlo, vhi)
+	}
+}
+
+// quotedHeaderValueEnd: where the value at v of a header inside quote ends. Closed, the value runs to its own
+// closing quote (inside double quotes an escaped one is the value's); with no closing quote on the line, to the
+// next quote of either kind or backslash, as a receiver splitting the argument reads it.
+func quotedHeaderValueEnd(s string, v int, quote byte) int {
+	e := v
+	closed := false
+	for e < len(s) && s[e] != '\n' {
+		if quote == '"' && s[e] == '\\' && e+1 < len(s) {
+			e += 2
+			continue
+		}
+		if s[e] == quote {
+			closed = true
+			break
+		}
+		e++
+	}
+	if e > len(s) {
+		e = len(s)
+	}
+	if !closed {
+		e = v
+		if v < len(s) && (s[v] == '"' || s[v] == '\'') {
+			// A value that opens the other quote is that quoted part (a truncated
+			// `-H 'X-Api-Key:"V"`).
+			_, e = lex.CrudeValue(s, v)
+		} else {
+			for e < len(s) && s[e] != '"' && s[e] != '\'' && s[e] != '\\' && s[e] != '\n' {
+				e++
 			}
 		}
 	}
+	return e
+}
+
+// schemeAssignments: a scheme word then a credential's name and `=` or `:` (`Token password:x`).
+func (a *auditor) schemeAssignments() {
+	s := a.s
 	low := lex.AsciiLower(s)
 	for _, w := range auditSchemeWords {
-		{
-			for at := 0; ; {
-				k := strings.Index(low[at:], w)
-				if k < 0 {
-					break
-				}
-				b := at + k
-				at = b + 1
-				if b > 0 && (lex.IsLowerASCII(s[b-1]) || lex.IsUpperASCII(s[b-1])) {
-					continue
-				}
-				j := b + len(w)
-				n := lex.SkipBlanks(s, j)
-				if n == j {
-					continue
-				}
-				for n < len(s) && s[n] == '-' {
-					n++
-				}
-				ne := lex.NameRunAfter(s, n)
-				if ne == n || ne >= len(s) || (s[ne] != '=' && s[ne] != ':') || !vocab.IsCredentialName(s[n:ne]) {
-					continue
-				}
-				lo, hi := schemeValue(s, ne+1)
-				if live(s[lo:hi]) {
-					a.hitAt("secret:scheme-value", lo, hi)
-				}
+		for at := 0; ; {
+			k := strings.Index(low[at:], w)
+			if k < 0 {
+				break
 			}
+			b := at + k
+			at = b + 1
+			a.schemeAssignmentAt(b, w)
 		}
+	}
+}
+
+// schemeAssignmentAt: the scheme word w at b, when a credential's assignment follows it with a live value.
+func (a *auditor) schemeAssignmentAt(b int, w string) {
+	s := a.s
+	if b > 0 && (lex.IsLowerASCII(s[b-1]) || lex.IsUpperASCII(s[b-1])) {
+		return
+	}
+	j := b + len(w)
+	n := lex.SkipBlanks(s, j)
+	if n == j {
+		return
+	}
+	for n < len(s) && s[n] == '-' {
+		n++
+	}
+	ne := lex.NameRunAfter(s, n)
+	if ne == n || ne >= len(s) || (s[ne] != '=' && s[ne] != ':') || !vocab.IsCredentialName(s[n:ne]) {
+		return
+	}
+	lo, hi := schemeValue(s, ne+1)
+	if live(s[lo:hi]) {
+		a.hitAt("secret:scheme-value", lo, hi)
 	}
 }
 

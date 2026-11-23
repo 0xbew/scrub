@@ -59,12 +59,24 @@ func roleKind(role string) span.Kind {
 	return span.KindPerson
 }
 
+// literalSep: what may join a literal's words. Every dash (\p{Pd}, `-` among them) and the minus sign, because a name
+// joined by an en dash or a Unicode hyphen is still the name; an invisible format character (\p{Cf}: a soft hyphen,
+// a zero-width space), because the name reads as written without it.
+const literalSep = `[\s\x{0B}\p{Z}\x{85}._\p{Pd}\x{2212}\p{Cf}]*`
+
+// isLiteralSep: a character literalSep matches, so a literal written with one (`Ann-Marie Example`) is split there
+// and matches with any other joiner.
+func isLiteralSep(r rune) bool {
+	return unicode.IsSpace(r) || unicode.Is(unicode.Z, r) || r == '.' || r == '_' || unicode.Is(unicode.Pd, r) ||
+		r == '\u2212' || unicode.Is(unicode.Cf, r)
+}
+
 func literalPattern(text string) string {
-	parts := strings.Fields(text)
+	parts := strings.FieldsFunc(text, isLiteralSep)
 	for i, p := range parts {
 		parts[i] = regexp.QuoteMeta(p)
 	}
-	return `(?i)` + strings.Join(parts, `[\s\p{Z}\x{85}._-]*`)
+	return `(?i)` + strings.Join(parts, literalSep)
 }
 
 func usable(rx *regexp.Regexp, literal bool, where string) error {
@@ -179,66 +191,102 @@ func parseFields(data map[string]json.RawMessage, version int) (*List, error) {
 	}
 	d := &List{Version: version}
 	for i, raw := range ids {
-		where := fmt.Sprintf("identities[%d]", i)
-		var entry map[string]json.RawMessage
-		if json.Unmarshal(raw, &entry) != nil || entry == nil {
-			return nil, &Error{where + " must be an object"}
-		}
-		extra := 0
-		for k := range entry {
-			if k != "literal" && k != "regex" && k != "role" {
-				extra++
-			}
-		}
-		if extra > 0 {
-			return nil, &Error{fmt.Sprintf("%s has %d unknown key(s): only literal, regex and role are allowed", where, extra)}
-		}
-		_, hasLit := entry["literal"]
-		_, hasRx := entry["regex"]
-		if hasLit == hasRx {
-			return nil, &Error{where + " needs exactly one of literal or regex"}
-		}
-		var role string
-		if json.Unmarshal(entry["role"], &role) != nil || !(role == "owner" || role == "teammate" || role == "person") {
-			return nil, &Error{where + " role must be one of owner, teammate, person"}
-		}
-		kind := "literal"
-		if hasRx {
-			kind = "regex"
-		}
-		var value string
-		if json.Unmarshal(entry[kind], &value) != nil || strings.TrimSpace(value) == "" {
-			return nil, &Error{fmt.Sprintf("%s %s is empty or not text", where, kind)}
-		}
-		var rx *regexp.Regexp
-		if kind == "literal" {
-			rx = regexp.MustCompile(literalPattern(value))
-		} else {
-			var err error
-			rx, err = regexp.Compile(`(?i)` + value)
-			if err != nil {
-				// Never the pattern: the compiler's message can quote it.
-				return nil, &Error{where + " regex does not compile"}
-			}
-		}
-		if err := usable(rx, kind == "literal", where); err != nil {
+		id, err := parseIdentity(i, raw)
+		if err != nil {
 			return nil, err
 		}
-		d.Identities = append(d.Identities, Identity{fmt.Sprintf("identity[%d]:%s", i, role), rx, kind == "literal", roleKind(role)})
+		d.Identities = append(d.Identities, id)
 	}
 	for j, raw := range vendors {
-		where := fmt.Sprintf("vendors[%d]", j)
-		var name string
-		if json.Unmarshal(raw, &name) != nil || lex.RuneLen(strings.TrimSpace(name)) < minVendorChars {
-			return nil, &Error{fmt.Sprintf("%s must be text of at least %d characters", where, minVendorChars)}
-		}
-		rx := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(strings.TrimSpace(name)))
-		if err := usable(rx, false, where); err != nil {
+		v, err := parseVendor(j, raw)
+		if err != nil {
 			return nil, err
 		}
-		d.Vendors = append(d.Vendors, vendor{fmt.Sprintf("vendor[%d]", j), rx})
+		d.Vendors = append(d.Vendors, v)
 	}
 	return d, nil
+}
+
+// parseIdentity: the i-th identity entry: one literal or regex, a known role, and a pattern
+// that compiles and is usable.
+func parseIdentity(i int, raw json.RawMessage) (Identity, error) {
+	where := fmt.Sprintf("identities[%d]", i)
+	var entry map[string]json.RawMessage
+	if json.Unmarshal(raw, &entry) != nil || entry == nil {
+		return Identity{}, &Error{where + " must be an object"}
+	}
+	extra := 0
+	for k := range entry {
+		if k != "literal" && k != "regex" && k != "role" {
+			extra++
+		}
+	}
+	if extra > 0 {
+		return Identity{}, &Error{fmt.Sprintf("%s has %d unknown key(s): only literal, regex and role are allowed", where, extra)}
+	}
+	_, hasLit := entry["literal"]
+	_, hasRx := entry["regex"]
+	if hasLit == hasRx {
+		return Identity{}, &Error{where + " needs exactly one of literal or regex"}
+	}
+	var role string
+	if json.Unmarshal(entry["role"], &role) != nil || !knownRole(role) {
+		return Identity{}, &Error{where + " role must be one of owner, teammate, person"}
+	}
+	kind := "literal"
+	if hasRx {
+		kind = "regex"
+	}
+	var value string
+	if json.Unmarshal(entry[kind], &value) != nil || strings.TrimSpace(value) == "" {
+		return Identity{}, &Error{fmt.Sprintf("%s %s is empty or not text", where, kind)}
+	}
+	rx, err := identityPattern(kind, value, where)
+	if err != nil {
+		return Identity{}, err
+	}
+	if err := usable(rx, kind == "literal", where); err != nil {
+		return Identity{}, err
+	}
+	return Identity{fmt.Sprintf("identity[%d]:%s", i, role), rx, kind == "literal", roleKind(role)}, nil
+}
+
+// knownRole: role is owner, teammate or person.
+func knownRole(role string) bool { return role == "owner" || role == "teammate" || role == "person" }
+
+// identityPattern: the pattern of an identity's value: a literal's, or the regex compiled
+// case-insensitive.
+func identityPattern(kind, value, where string) (*regexp.Regexp, error) {
+	var rx *regexp.Regexp
+	if kind == "literal" {
+		if len(strings.FieldsFunc(value, isLiteralSep)) == 0 {
+			// Its pattern would be empty, and an empty match never stands for a literal: an entry that hides nothing.
+			return nil, &Error{where + " literal has no words, only separators"}
+		}
+		rx = regexp.MustCompile(literalPattern(value))
+	} else {
+		var err error
+		rx, err = regexp.Compile(`(?i)` + value)
+		if err != nil {
+			// Never the pattern: the compiler's message can quote it.
+			return nil, &Error{where + " regex does not compile"}
+		}
+	}
+	return rx, nil
+}
+
+// parseVendor: the j-th vendor: text of at least minVendorChars characters whose pattern is usable.
+func parseVendor(j int, raw json.RawMessage) (vendor, error) {
+	where := fmt.Sprintf("vendors[%d]", j)
+	var name string
+	if json.Unmarshal(raw, &name) != nil || lex.RuneLen(strings.TrimSpace(name)) < minVendorChars {
+		return vendor{}, &Error{fmt.Sprintf("%s must be text of at least %d characters", where, minVendorChars)}
+	}
+	rx := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(strings.TrimSpace(name)))
+	if err := usable(rx, false, where); err != nil {
+		return vendor{}, err
+	}
+	return vendor{fmt.Sprintf("vendor[%d]", j), rx}, nil
 }
 
 // takeVersion removes the payload's `version` key and returns it: 0 when it is not a whole

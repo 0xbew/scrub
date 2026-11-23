@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -27,64 +28,92 @@ func Emails(s string, emit func(lo, hi int)) {
 		return
 	}
 	for at := strings.IndexByte(s, '@'); at >= 0; at = lex.NextByte(s, '@', at+1) {
-		l := at
-		for l > 0 && isLocalChar(s, l-1) {
-			l--
-		}
-		// back up over a partial rune
-		if l == at {
+		l, ok := emailLocalStart(s, at)
+		if !ok {
 			continue
 		}
-		local := s[l:at]
-		hasWord := false
-		for i := l; i < at; i++ {
-			if lex.IsWordAt(s, i) {
-				hasWord = true
-				break
-			}
-		}
-		if !hasWord && (l == 0 || s[l-1] == '\n') {
+		dots, ok := emailDots(s, at)
+		if !ok {
 			continue
 		}
-		_ = local
-		// domain labels
-		j := at + 1
-		var dots []int
-		labelStart := j
-		for j < len(s) && isDomainChar(s, j) {
-			j++
-		}
-		if j == labelStart {
-			continue
-		}
-		for j < len(s) && s[j] == '.' {
-			k := j + 1
-			for k < len(s) && isDomainChar(s, k) {
-				k++
-			}
-			if k == j+1 {
-				break
-			}
-			dots = append(dots, j)
-			j = k
-		}
-		for d := len(dots) - 1; d >= 0; d-- {
-			ls := dots[d] + 1
-			le := ls
-			for le < len(s) && (lex.IsLowerASCII(s[le]) || lex.IsUpperASCII(s[le])) {
-				le++
-			}
-			if le-ls < 2 {
-				continue
-			}
-			// An underscore glued to the last label (`a@b.test_` in a name) does not make it a longer label.
-			if le < len(s) && isDomainChar(s, le) && s[le] != '_' {
-				continue
-			}
+		if le, ok := emailLastLabelEnd(s, dots); ok {
 			emit(l, le)
+		}
+	}
+}
+
+// emailLocalStart: where the local part before the `@` at at starts; false when it is empty, or
+// punctuation alone at a line's start.
+func emailLocalStart(s string, at int) (int, bool) {
+	l := at
+	for l > 0 && isLocalChar(s, l-1) {
+		l--
+	}
+	// back up over a partial rune
+	if l == at {
+		return 0, false
+	}
+	local := s[l:at]
+	hasWord := false
+	for i := l; i < at; i++ {
+		if lex.IsWordAt(s, i) {
+			hasWord = true
 			break
 		}
 	}
+	if !hasWord && (l == 0 || s[l-1] == '\n') {
+		return 0, false
+	}
+	_ = local
+	return l, true
+}
+
+// emailDots: the dot before each label of the domain after the `@` at at; false when no label
+// follows the `@`.
+func emailDots(s string, at int) ([]int, bool) {
+	// domain labels
+	j := at + 1
+	var dots []int
+	labelStart := j
+	for j < len(s) && isDomainChar(s, j) {
+		j++
+	}
+	if j == labelStart {
+		return nil, false
+	}
+	for j < len(s) && s[j] == '.' {
+		k := j + 1
+		for k < len(s) && isDomainChar(s, k) {
+			k++
+		}
+		if k == j+1 {
+			break
+		}
+		dots = append(dots, j)
+		j = k
+	}
+	return dots, true
+}
+
+// emailLastLabelEnd: the end of the address: the last label after a dot, from the right, that
+// starts with two letters or more and is not glued to more of a domain.
+func emailLastLabelEnd(s string, dots []int) (int, bool) {
+	for _, dot := range slices.Backward(dots) {
+		ls := dot + 1
+		le := ls
+		for le < len(s) && (lex.IsLowerASCII(s[le]) || lex.IsUpperASCII(s[le])) {
+			le++
+		}
+		if le-ls < 2 {
+			continue
+		}
+		// An underscore glued to the last label (`a@b.test_` in a name) does not make it a longer label.
+		if le < len(s) && isDomainChar(s, le) && s[le] != '_' {
+			continue
+		}
+		return le, true
+	}
+	return 0, false
 }
 
 func isPyDigit(r rune) bool { return unicode.IsDigit(r) }
@@ -137,6 +166,20 @@ func sepAt(s string, i int) (int, bool) {
 
 // nanpAt: `(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s?|\d{3}[\s.-])\d{3}[\s.-]\d{4}` at i, every end.
 func nanpAt(s string, i int) []int {
+	starts := nanpStarts(s, i)
+	var ends []int
+	for _, a := range starts {
+		if a == i && i < len(s) && s[i] == '+' {
+			continue
+		}
+		bs := nanpAreaEnds(s, a)
+		ends = nanpLineEnds(s, bs, ends)
+	}
+	return ends
+}
+
+// nanpStarts: where the area code may start after the optional `+1` and separator at i.
+func nanpStarts(s string, i int) []int {
 	var starts []int
 	starts = append(starts, i)
 	j := i
@@ -150,33 +193,39 @@ func nanpAt(s string, i int) []int {
 			starts = append(starts, k2)
 		}
 	}
-	var ends []int
-	for _, a := range starts {
-		if a == i && i < len(s) && s[i] == '+' {
-			continue
-		}
-		var bs []int
-		if a < len(s) && s[a] == '(' {
-			if k, ok := digitsAt(s, a+1, 3); ok && k < len(s) && s[k] == ')' {
-				bs = append(bs, k+1)
-				if k2 := k + 1; k2 < len(s) {
-					r, sz := utf8.DecodeRuneInString(s[k2:])
-					if isPySpace(r) {
-						bs = append(bs, k2+sz)
-					}
+	return starts
+}
+
+// nanpAreaEnds: every end of an area code at a: `(\d{3})` with an optional space after, or
+// `\d{3}` and a separator.
+func nanpAreaEnds(s string, a int) []int {
+	var bs []int
+	if a < len(s) && s[a] == '(' {
+		if k, ok := digitsAt(s, a+1, 3); ok && k < len(s) && s[k] == ')' {
+			bs = append(bs, k+1)
+			if k2 := k + 1; k2 < len(s) {
+				r, sz := utf8.DecodeRuneInString(s[k2:])
+				if isPySpace(r) {
+					bs = append(bs, k2+sz)
 				}
 			}
-		} else if k, ok := digitsAt(s, a, 3); ok {
-			if k2, ok := sepAt(s, k); ok {
-				bs = append(bs, k2)
-			}
 		}
-		for _, b := range bs {
-			if k, ok := digitsAt(s, b, 3); ok {
-				if k2, ok := sepAt(s, k); ok {
-					if k3, ok := digitsAt(s, k2, 4); ok {
-						ends = append(ends, k3)
-					}
+	} else if k, ok := digitsAt(s, a, 3); ok {
+		if k2, ok := sepAt(s, k); ok {
+			bs = append(bs, k2)
+		}
+	}
+	return bs
+}
+
+// nanpLineEnds: ends with the end of `\d{3}[\s.-]\d{4}` after each area code's end in bs
+// appended.
+func nanpLineEnds(s string, bs, ends []int) []int {
+	for _, b := range bs {
+		if k, ok := digitsAt(s, b, 3); ok {
+			if k2, ok := sepAt(s, k); ok {
+				if k3, ok := digitsAt(s, k2, 4); ok {
+					ends = append(ends, k3)
 				}
 			}
 		}
@@ -222,38 +271,51 @@ func phonesIntl(s string, emit func(lo, hi int)) {
 		if !phoneBoundaryBefore(s, i) || i+1 >= len(s) || s[i+1] < '1' || s[i+1] > '9' {
 			continue
 		}
-		// candidate ends: after k class characters (6..22) then a digit
-		var pos []int // byte offset after each class rune
-		j := i + 2
-		for n := 0; n < 23 && j < len(s); n++ {
-			r, sz := utf8.DecodeRuneInString(s[j:])
-			if !(isPyDigit(r) || isPySpace(r) || r == '(' || r == ')' || r == '.' || r == '-') {
-				break
-			}
-			j += sz
-			pos = append(pos, j)
-		}
-		for n := len(pos); n >= 7; n-- {
-			e := pos[n-1]
-			r, _ := utf8.DecodeLastRuneInString(s[:e])
-			if !isPyDigit(r) || n-1 > 22 || n-1 < 6 {
-				continue
-			}
-			if !phoneBoundaryAfter(s, e) {
-				continue
-			}
-			digits := 0
-			for _, r := range s[i:e] {
-				if isPyDigit(r) {
-					digits++
-				}
-			}
-			if digits >= 8 {
-				emit(i, e)
-			}
-			break
+		if e, ok := intlPhoneEnd(s, i, phoneClassEnds(s, i+2)); ok {
+			emit(i, e)
 		}
 	}
+}
+
+// phoneClassEnds: the byte offset after each of up to 23 phone characters (`[\d\s().-]`) from j.
+func phoneClassEnds(s string, j int) []int {
+	var pos []int
+	for n := 0; n < 23 && j < len(s); n++ {
+		r, sz := utf8.DecodeRuneInString(s[j:])
+		if !isPhoneClass(r) {
+			break
+		}
+		j += sz
+		pos = append(pos, j)
+	}
+	return pos
+}
+
+func isPhoneClass(r rune) bool {
+	return isPyDigit(r) || isPySpace(r) || r == '(' || r == ')' || r == '.' || r == '-'
+}
+
+// intlPhoneEnd: the longest candidate end in pos (6 to 22 phone characters then a digit) with a boundary after
+// it; ok when the number from i to there holds 8 or more digits. A shorter candidate is never tried after it.
+func intlPhoneEnd(s string, i int, pos []int) (int, bool) {
+	for n := len(pos); n >= 7; n-- {
+		e := pos[n-1]
+		r, _ := utf8.DecodeLastRuneInString(s[:e])
+		if !isPyDigit(r) || n-1 > 22 || n-1 < 6 {
+			continue
+		}
+		if !phoneBoundaryAfter(s, e) {
+			continue
+		}
+		digits := 0
+		for _, r := range s[i:e] {
+			if isPyDigit(r) {
+				digits++
+			}
+		}
+		return e, digits >= 8
+	}
+	return 0, false
 }
 
 // Shapes: addresses and phone numbers. A percent-decoded reading reads `+` as a space, which

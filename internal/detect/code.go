@@ -65,6 +65,13 @@ func (c *Scan) codeAssignment(start, e int) {
 	}
 	afterOpen := OpenersEnd(s, v)
 	c.statementLiterals(afterOpen, start)
+	c.lineStartValue(start, v)
+	c.codeValue(afterOpen, start, e)
+}
+
+// lineStartValue: a bare value at v, its name at a line start (start): every word to a stop word.
+func (c *Scan) lineStartValue(start, v int) {
+	s := c.S
 	// A bare value at a line start: every word to a stop word.
 	ls := lex.LineStart(s, start)
 	head := s[ls:start]
@@ -73,24 +80,33 @@ func (c *Scan) codeAssignment(start, e int) {
 		if ee := escapedHeredocEnd(s, v); ee > v {
 			c.hideValue(v, ee)
 		} else if we := CodeWordEnd(s, v); we > v {
-			end := we
-			for {
-				k := lex.SkipBlanks(s, end)
-				if k == end || k >= len(s) || ColonStop(s, k) {
-					break
-				}
-				ke := CodeWordEnd(s, k)
-				if ke == k {
-					break
-				}
-				end = ke
-			}
-			c.hideValue(v, end)
+			c.hideValue(v, codeWordsEnd(s, we))
 		}
 	}
+}
+
+// codeWordsEnd: past the code words after the one ending at end, to a stop word.
+func codeWordsEnd(s string, end int) int {
+	for {
+		k := lex.SkipBlanks(s, end)
+		if k == end || k >= len(s) || ColonStop(s, k) {
+			break
+		}
+		ke := CodeWordEnd(s, k)
+		if ke == k {
+			break
+		}
+		end = ke
+	}
+	return end
+}
+
+// codeValue: the value at a, past the openers, of the name s[start:e]: an array, an escaped
+// heredoc, or one code word.
+func (c *Scan) codeValue(a, start, e int) {
+	s := c.S
 	// Anywhere: an array, an escaped heredoc, or one code word. A word that looks random is a value even with a
 	// bracket after it in prose (`token = Q7MD4J9 (see above)`).
-	a := afterOpen
 	if StartsPlaceholder(s, a) {
 		return
 	}

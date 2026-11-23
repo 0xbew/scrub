@@ -111,11 +111,16 @@ func escapedAt(s string, i int) bool {
 	return n%2 == 1
 }
 
+// opensObject: the `{` at v opens an object or a template, not a scheme tag glued to its value (`{SSHA}…`).
+func opensObject(s string, v int) bool {
+	return v < len(s) && s[v] == '{' && lex.SchemeTagEnd(s, v) < 0
+}
+
 // objectAfter: the object a credential's name holds goes whole, to its matching brace.
 func (c *Scan) objectAfter(name string, p int) {
 	s := c.S
 	v := lex.SkipSpaceConts(s, p+1)
-	if v >= len(s) || s[v] != '{' || (v+1 < len(s) && s[v+1] == '{') || !vocab.IsCredentialName(name) {
+	if v >= len(s) || !opensObject(s, v) || (v+1 < len(s) && s[v+1] == '{') || !vocab.IsCredentialName(name) {
 		return
 	}
 	end := lex.ObjectEnd(s, v+1)
@@ -128,18 +133,7 @@ func (c *Scan) objectAfter(name string, p int) {
 // schemeAssigned: an assignment written after an auth scheme word (`Token password:x`).
 func (c *Scan) schemeAssigned(q int, name string, p int) {
 	s := c.S
-	j := q
-	for j > 0 {
-		if s[j-1] == ' ' || s[j-1] == '\t' {
-			j--
-			continue
-		}
-		if j >= 2 && s[j-1] == '\n' && s[j-2] == '\\' {
-			j -= 2
-			continue
-		}
-		break
-	}
+	j := blanksContsBefore(s, q)
 	if j == q {
 		return
 	}
@@ -166,4 +160,22 @@ func (c *Scan) schemeAssigned(q int, name string, p int) {
 		return
 	}
 	c.hideValue(vs, lex.ValueEnd(s, vs))
+}
+
+// blanksContsBefore: where the blanks and escaped line breaks (`\` and a newline) that end at q
+// start.
+func blanksContsBefore(s string, q int) int {
+	j := q
+	for j > 0 {
+		if s[j-1] == ' ' || s[j-1] == '\t' {
+			j--
+			continue
+		}
+		if j >= 2 && s[j-1] == '\n' && s[j-2] == '\\' {
+			j -= 2
+			continue
+		}
+		break
+	}
+	return j
 }

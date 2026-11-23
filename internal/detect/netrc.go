@@ -57,34 +57,49 @@ func (c *Scan) netrc() {
 		i := m[3]
 		entry := false
 		if s[m[2]:m[3]] == "machine" {
-			lo, hi, _, _, ok := netrcWord(s, i)
-			if !ok {
+			var ok bool
+			if i, entry, ok = netrcHost(s, i); !ok {
 				continue
 			}
-			host := s[lo:hi]
-			entry = strings.Contains(host, ".") || host == "localhost"
-			i = hi
 		}
-		for {
-			lo, hi, _, _, ok := netrcWord(s, i)
-			if !ok {
-				break
-			}
-			key := s[lo:hi]
-			if key != "login" && key != "account" && key != "port" && key != "password" {
-				break
-			}
-			_, vhi, blo, bhi, ok := netrcWord(s, hi)
-			if !ok {
-				break
-			}
-			if key == "login" {
-				entry = true
-			}
-			if key == "password" && entry && bhi > blo {
-				c.hideValue(blo, bhi)
-			}
-			i = vhi
+		c.netrcPairs(i, entry)
+	}
+}
+
+// netrcHost: past the host after `machine` at i, and whether it names an entry (a dotted host or localhost); false
+// at the end of the text.
+func netrcHost(s string, i int) (int, bool, bool) {
+	lo, hi, _, _, ok := netrcWord(s, i)
+	if !ok {
+		return 0, false, false
+	}
+	host := s[lo:hi]
+	return hi, strings.Contains(host, ".") || host == "localhost", true
+}
+
+// netrcPairs: the entry's `login`, `account`, `port` and `password` pairs from i, to the first other word; a login
+// makes it an entry, and an entry's password goes.
+func (c *Scan) netrcPairs(i int, entry bool) {
+	s := c.S
+	for {
+		lo, hi, _, _, ok := netrcWord(s, i)
+		if !ok {
+			break
 		}
+		key := s[lo:hi]
+		if key != "login" && key != "account" && key != "port" && key != "password" {
+			break
+		}
+		_, vhi, blo, bhi, ok := netrcWord(s, hi)
+		if !ok {
+			break
+		}
+		if key == "login" {
+			entry = true
+		}
+		if key == "password" && entry && bhi > blo {
+			c.hideValue(blo, bhi)
+		}
+		i = vhi
 	}
 }

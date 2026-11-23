@@ -117,80 +117,135 @@ func (r *Reading) Source(a, b int) (int, int) {
 // the reading is marked joined: words either side of it run together.
 func (r *Reading) unescape(json bool) *Reading {
 	s := r.Text
-	out := &Reading{Kind: readUnescaped, Pct: r.Pct, Pctd: r.Pctd, Src: r.Src, Joined: r.Joined}
-	b := make([]byte, 0, len(s))
-	emit := func(c byte, lo, hi int32) {
-		b = append(b, c)
-		out.Lo = append(out.Lo, lo)
-		out.Hi = append(out.Hi, hi)
+	u := &unescaper{
+		r:   r,
+		out: &Reading{Kind: readUnescaped, Pct: r.Pct, Pctd: r.Pctd, Src: r.Src, Joined: r.Joined},
+		b:   make([]byte, 0, len(s)),
 	}
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\\' && i+1 < len(s) {
-			switch s[i+1] {
-			case 'n', 'r', 't':
-				if json {
-					c := byte('\n')
-					if s[i+1] == 'r' {
-						c = '\r'
-					} else if s[i+1] == 't' {
-						c = '\t'
-					}
-					emit(c, r.Lo[i], r.Hi[i+1])
-					i++
-					continue
-				}
-				out.Joined = true
-			case 'u':
-				if json {
-					if c, n := unicodeEscape(s, i); n > 0 {
-						var buf [4]byte
-						for _, b := range buf[:utf8.EncodeRune(buf[:], c)] {
-							emit(b, r.Lo[i], r.Hi[i+n-1])
-						}
-						i += n - 1
-						continue
-					}
-				}
-			case 'x':
-				if json && i+3 < len(s) {
-					h, ok1 := unhex(s[i+2])
-					l, ok2 := unhex(s[i+3])
-					if ok1 && ok2 {
-						emit(h<<4|l, r.Lo[i], r.Hi[i+3])
-						i += 3
-						continue
-					}
-				}
-			case '0', '1', '2', '3', '4', '5', '6', '7':
-				if json {
-					v, n := 0, 0
-					for n < 3 && i+1+n < len(s) && s[i+1+n] >= '0' && s[i+1+n] <= '7' {
-						v = v*8 + int(s[i+1+n]-'0')
-						n++
-					}
-					if v <= 0xFF {
-						emit(byte(v), r.Lo[i], r.Hi[i+n])
-						i += n
-						continue
-					}
-				}
-			}
-			// The escaped character: one whole rune.
-			j := i + 1
-			k := j + 1
-			for k < len(s) && s[k]&0xC0 == 0x80 {
-				k++
-			}
-			for m := j; m < k; m++ {
-				emit(s[m], r.Lo[i], r.Hi[m])
-			}
-			i = k - 1
+			i = u.escape(i, json)
 			continue
 		}
-		emit(s[i], r.Lo[i], r.Hi[i])
+		u.emit(s[i], r.Lo[i], r.Hi[i])
 	}
-	out.Text = string(b)
-	return out
+	u.out.Text = string(u.b)
+	return u.out
+}
+
+// unescaper builds the reading unescape returns from r, one byte at a time.
+type unescaper struct {
+	r   *Reading
+	out *Reading
+	b   []byte
+}
+
+func (u *unescaper) emit(c byte, lo, hi int32) {
+	u.b = append(u.b, c)
+	u.out.Lo = append(u.out.Lo, lo)
+	u.out.Hi = append(u.out.Hi, hi)
+}
+
+// escape reads the escape whose backslash is at i and returns the index of its last byte.
+func (u *unescaper) escape(i int, json bool) int {
+	s := u.r.Text
+	switch s[i+1] {
+	case 'n', 'r', 't':
+		if json {
+			return u.lineBreak(i)
+		}
+		u.out.Joined = true
+	case 'u':
+		if json {
+			if last, ok := u.unicode(i); ok {
+				return last
+			}
+		}
+	case 'x':
+		if json && i+3 < len(s) {
+			if last, ok := u.hexByte(i); ok {
+				return last
+			}
+		}
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		if json {
+			if last, ok := u.octal(i); ok {
+				return last
+			}
+		}
+	}
+	return u.escapedRune(i)
+}
+
+// lineBreak: JSON's `\n` `\r` `\t` at i as its line break or tab.
+func (u *unescaper) lineBreak(i int) int {
+	s, r := u.r.Text, u.r
+	c := byte('\n')
+	switch s[i+1] {
+	case 'r':
+		c = '\r'
+	case 't':
+		c = '\t'
+	}
+	u.emit(c, r.Lo[i], r.Hi[i+1])
+	return i + 1
+}
+
+// unicode: a `\uXXXX` escape (or a surrogate pair of them) at i as its character's UTF-8 bytes; false when it is
+// not one.
+func (u *unescaper) unicode(i int) (int, bool) {
+	s, r := u.r.Text, u.r
+	c, n := unicodeEscape(s, i)
+	if n <= 0 {
+		return 0, false
+	}
+	var buf [4]byte
+	for _, x := range buf[:utf8.EncodeRune(buf[:], c)] {
+		u.emit(x, r.Lo[i], r.Hi[i+n-1])
+	}
+	return i + n - 1, true
+}
+
+// hexByte: a `\xHH` escape at i as its byte; false when its two digits are not hex.
+func (u *unescaper) hexByte(i int) (int, bool) {
+	s, r := u.r.Text, u.r
+	h, ok1 := unhex(s[i+2])
+	l, ok2 := unhex(s[i+3])
+	if !ok1 || !ok2 {
+		return 0, false
+	}
+	u.emit(h<<4|l, r.Lo[i], r.Hi[i+3])
+	return i + 3, true
+}
+
+// octal: up to three octal digits after the backslash at i as their byte; false above 0xFF.
+func (u *unescaper) octal(i int) (int, bool) {
+	s, r := u.r.Text, u.r
+	v, n := 0, 0
+	for n < 3 && i+1+n < len(s) && s[i+1+n] >= '0' && s[i+1+n] <= '7' {
+		v = v*8 + int(s[i+1+n]-'0')
+		n++
+	}
+	if v > 0xFF {
+		return 0, false
+	}
+	u.emit(byte(v), r.Lo[i], r.Hi[i+n])
+	return i + n, true
+}
+
+// escapedRune: the escaped character after the backslash at i, one whole rune, each byte mapped to the
+// backslash and itself.
+func (u *unescaper) escapedRune(i int) int {
+	s, r := u.r.Text, u.r
+	j := i + 1
+	k := j + 1
+	for k < len(s) && s[k]&0xC0 == 0x80 {
+		k++
+	}
+	for m := j; m < k; m++ {
+		u.emit(s[m], r.Lo[i], r.Hi[m])
+	}
+	return k - 1
 }
 
 func unhex(c byte) (byte, bool) {

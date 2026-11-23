@@ -38,31 +38,45 @@ func netPhone(s string) bool {
 	// A diff document's rows are read without their marker, as the scrubber reads a diff's sides; a diff quoted
 	// inside other text (a test's string) is read as written, where `+(415) …` is a marker and a row, no number.
 	if strings.HasPrefix(s, "diff --git ") || strings.HasPrefix(s, "--- ") || strings.HasPrefix(s, "@@ -") {
-		var b strings.Builder
-		for _, ln := range strings.SplitAfter(s, "\n") {
-			if ln != "" && strings.IndexByte("+- ", ln[0]) >= 0 {
-				ln = ln[1:]
-			}
-			b.WriteString(ln)
-		}
-		texts = append(texts, b.String())
+		texts = append(texts, netDiffRows(s))
 	}
 	for _, t := range texts {
-		for _, m := range netNANPRx.FindAllStringIndex(t, -1) {
-			if netPhoneApart(t, m[0], m[1]) {
-				return true
+		if netPhoneIn(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// netDiffRows: the diff document s with each row's `+`, `-` or ` ` marker taken off.
+func netDiffRows(s string) string {
+	var b strings.Builder
+	for _, ln := range strings.SplitAfter(s, "\n") {
+		if ln != "" && strings.IndexByte("+- ", ln[0]) >= 0 {
+			ln = ln[1:]
+		}
+		b.WriteString(ln)
+	}
+	return b.String()
+}
+
+// netPhoneIn: a North American number standing apart in t, or an international one with 8 to 15
+// digits that is no date.
+func netPhoneIn(t string) bool {
+	for _, m := range netNANPRx.FindAllStringIndex(t, -1) {
+		if netPhoneApart(t, m[0], m[1]) {
+			return true
+		}
+	}
+	for _, m := range netIntlRx.FindAllStringIndex(t, -1) {
+		digits := 0
+		for i := m[0]; i < m[1]; i++ {
+			if lex.IsDigitASCII(t[i]) {
+				digits++
 			}
 		}
-		for _, m := range netIntlRx.FindAllStringIndex(t, -1) {
-			digits := 0
-			for i := m[0]; i < m[1]; i++ {
-				if lex.IsDigitASCII(t[i]) {
-					digits++
-				}
-			}
-			if digits >= 8 && digits <= 15 && netPhoneApart(t, m[0], m[1]) && !netDateRx.MatchString(t[m[0]:m[1]]) {
-				return true
-			}
+		if digits >= 8 && digits <= 15 && netPhoneApart(t, m[0], m[1]) && !netDateRx.MatchString(t[m[0]:m[1]]) {
+			return true
 		}
 	}
 	return false

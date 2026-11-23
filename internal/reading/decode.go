@@ -49,31 +49,49 @@ func Of(base *Reading, decode bool) []*Reading {
 	out := []*Reading{base}
 	starts := []*Reading{base}
 	if decode {
-		frontier := []*Reading{base}
-		// A continuation is joined first, as a shell joins it before anything decodes what it wrote; the two
-		// decodings after it may then read an escape the continuation split (`%25` `\`-newline `20`).
-		if strings.Contains(base.Text, "\\\n") || strings.Contains(base.Text, "\\\r\n") {
-			j := base.joinConts()
-			if !seen[j.Text] {
-				seen[j.Text] = true
-				starts = append(starts, j)
-				frontier = append(frontier, j)
-			}
-		}
-		for depth := 0; depth < 2 && len(frontier) > 0; depth++ {
-			var next []*Reading
-			for _, r := range frontier {
-				for _, d := range r.decodings() {
-					if !seen[d.Text] {
-						seen[d.Text] = true
-						starts = append(starts, d)
-						next = append(next, d)
-					}
-				}
-			}
-			frontier = next
+		starts = decodedStarts(base, seen, starts)
+	}
+	return escapeLevels(starts, seen, out)
+}
+
+// decodedStarts: starts with base's continuations joined and up to two decodings in turn
+// appended, each one not seen before (and marked seen).
+func decodedStarts(base *Reading, seen map[string]bool, starts []*Reading) []*Reading {
+	frontier := []*Reading{base}
+	// A continuation is joined first, as a shell joins it before anything decodes what it wrote; the two
+	// decodings after it may then read an escape the continuation split (`%25` `\`-newline `20`).
+	if strings.Contains(base.Text, "\\\n") || strings.Contains(base.Text, "\\\r\n") {
+		j := base.joinConts()
+		if !seen[j.Text] {
+			seen[j.Text] = true
+			starts = append(starts, j)
+			frontier = append(frontier, j)
 		}
 	}
+	for depth := 0; depth < 2 && len(frontier) > 0; depth++ {
+		frontier, starts = decodeFrontier(frontier, seen, starts)
+	}
+	return starts
+}
+
+// decodeFrontier: the decodings of each reading of frontier not seen before (marked seen), as
+// the next frontier, and starts with them appended.
+func decodeFrontier(frontier []*Reading, seen map[string]bool, starts []*Reading) (next, more []*Reading) {
+	for _, r := range frontier {
+		for _, d := range r.decodings() {
+			if !seen[d.Text] {
+				seen[d.Text] = true
+				starts = append(starts, d)
+				next = append(next, d)
+			}
+		}
+	}
+	return next, starts
+}
+
+// escapeLevels: out with each start after the first appended, each followed by the levels of
+// backslash escaping removed from it (and each level's JSON string reading) not seen before.
+func escapeLevels(starts []*Reading, seen map[string]bool, out []*Reading) []*Reading {
 	add := func(r *Reading) {
 		if !seen[r.Text] {
 			seen[r.Text] = true
@@ -85,19 +103,25 @@ func Of(base *Reading, decode bool) []*Reading {
 		if si > 0 {
 			out = append(out, level)
 		}
-		for n := 0; n < maxEscapeLevels; n++ {
-			if hasJSONEscape(level.Text) {
-				add(level.unescape(true))
-			}
-			next := level.unescape(false)
-			if next.Text == level.Text {
-				break
-			}
-			level = next
-			add(level)
-		}
+		unescapeLevels(level, add)
 	}
 	return out
+}
+
+// unescapeLevels: each level of backslash escaping removed from level in turn, up to
+// maxEscapeLevels, and each level that holds a JSON string's escapes read as one, passed to add.
+func unescapeLevels(level *Reading, add func(*Reading)) {
+	for range maxEscapeLevels {
+		if hasJSONEscape(level.Text) {
+			add(level.unescape(true))
+		}
+		next := level.unescape(false)
+		if next.Text == level.Text {
+			break
+		}
+		level = next
+		add(level)
+	}
 }
 
 // decodings: each decoding a receiver may apply to r that changes it.
@@ -191,25 +215,7 @@ func (r *Reading) htmlDecode() *Reading {
 func htmlEntityAt(s string, i int) (rune, int) {
 	j := i + 1
 	if j < len(s) && s[j] == '#' {
-		j++
-		base := 10
-		if j < len(s) && (s[j] == 'x' || s[j] == 'X') {
-			base = 16
-			j++
-		}
-		v, k := 0, j
-		for k < len(s) && k-j < 7 {
-			h, ok := unhex(s[k])
-			if !ok || int(h) >= base {
-				break
-			}
-			v = v*base + int(h)
-			k++
-		}
-		if k == j || k >= len(s) || s[k] != ';' || v == 0 || v > utf8.MaxRune || (v >= 0xD800 && v < 0xE000) {
-			return 0, 0
-		}
-		return rune(v), k + 1 - i
+		return htmlNumericEntityAt(s, i, j+1)
 	}
 	k := j
 	for k < len(s) && k-j < 10 && lex.IsAlnumASCII(s[k]) {
@@ -221,6 +227,35 @@ func htmlEntityAt(s string, i int) (rune, int) {
 		}
 	}
 	return 0, 0
+}
+
+// htmlNumericEntityAt: the character a numeric entity at i (`&#65;`, `&#x41;`) stands for and its
+// length, j just after its `#`; 0 when it is none or no valid character.
+func htmlNumericEntityAt(s string, i, j int) (rune, int) {
+	base := 10
+	if j < len(s) && (s[j] == 'x' || s[j] == 'X') {
+		base = 16
+		j++
+	}
+	v, k := htmlEntityDigits(s, j, base)
+	if k == j || k >= len(s) || s[k] != ';' || v == 0 || v > utf8.MaxRune || (v >= 0xD800 && v < 0xE000) {
+		return 0, 0
+	}
+	return rune(v), k + 1 - i
+}
+
+// htmlEntityDigits: the value of up to 7 digits in base from j, and where they end.
+func htmlEntityDigits(s string, j, base int) (v, k int) {
+	v, k = 0, j
+	for k < len(s) && k-j < 7 {
+		h, ok := unhex(s[k])
+		if !ok || int(h) >= base {
+			break
+		}
+		v = v*base + int(h)
+		k++
+	}
+	return v, k
 }
 
 // foldWidth reads fullwidth forms (U+FF01..U+FF5E) as their ASCII characters and the ideographic space as a space.
@@ -257,20 +292,7 @@ func (r *Reading) joinConts() *Reading {
 	diff := looksLikeDiff(s)
 	for i := 0; i < len(s); i++ {
 		if n := lex.ContAt(s, i); n > 0 {
-			if k := i + n; k < len(s) && (s[k] == '+' || s[k] == '-') {
-				// Into a diff's `+` or `-` row: a row of blanks then content joins without its marker. In a diff,
-				// another is the other side's row, and a shell on this side never reads it.
-				if k+1 < len(s) && (s[k+1] == ' ' || s[k+1] == '\t') {
-					i += n
-					continue
-				}
-				// Or a row of the other side right after this one (`-x \` then `+y`), headers or not.
-				if cur := s[lex.LineStart(s, i)]; diff || ((cur == '+' || cur == '-') && cur != s[k]) {
-					d.emit(s[i], i, i+1)
-					continue
-				}
-			}
-			i += n - 1
+			i = joinContAt(d, s, i, n, diff)
 			continue
 		}
 		d.emit(s[i], i, i+1)
@@ -278,22 +300,49 @@ func (r *Reading) joinConts() *Reading {
 	return d.done()
 }
 
+// joinContAt: the continuation of n bytes at i read as nothing, unless it runs into a diff's row
+// of the other side: the index the next byte is read after.
+func joinContAt(d *derived, s string, i, n int, diff bool) int {
+	if k := i + n; k < len(s) && (s[k] == '+' || s[k] == '-') {
+		// Into a diff's `+` or `-` row: a row of blanks then content joins without its marker. In a diff,
+		// another is the other side's row, and a shell on this side never reads it.
+		if k+1 < len(s) && (s[k+1] == ' ' || s[k+1] == '\t') {
+			return i + n
+		}
+		// Or a row of the other side right after this one (`-x \` then `+y`), headers or not.
+		if cur := s[lex.LineStart(s, i)]; diff || ((cur == '+' || cur == '-') && cur != s[k]) {
+			d.emit(s[i], i, i+1)
+			return i
+		}
+	}
+	return i + n - 1
+}
+
 // hasJSONEscape: `\n` `\r` `\t`, `\uXXXX`, `\xNN` or an octal escape somewhere in s.
 func hasJSONEscape(s string) bool {
 	for i := strings.IndexByte(s, '\\'); i >= 0 && i+1 < len(s); i = lex.NextByte(s, '\\', i+2) {
-		switch c := s[i+1]; {
-		case c == 'n' || c == 'r' || c == 't' || (c >= '0' && c <= '7'):
+		if jsonEscapeAt(s, i) {
 			return true
-		case c == 'u':
-			if _, n := unicodeEscape(s, i); n > 0 {
-				return true
-			}
-		case c == 'x':
-			if i+3 < len(s) {
-				if _, ok := unhex(s[i+2]); ok {
-					if _, ok := unhex(s[i+3]); ok {
-						return true
-					}
+		}
+	}
+	return false
+}
+
+// jsonEscapeAt: the backslash at i (with a byte after it) opens `\n` `\r` `\t`, a `\uXXXX`
+// that decodes to a rune (a surrogate only as a whole pair), a `\xNN`, or an octal digit.
+func jsonEscapeAt(s string, i int) bool {
+	switch c := s[i+1]; {
+	case c == 'n' || c == 'r' || c == 't' || (c >= '0' && c <= '7'):
+		return true
+	case c == 'u':
+		if _, n := unicodeEscape(s, i); n > 0 {
+			return true
+		}
+	case c == 'x':
+		if i+3 < len(s) {
+			if _, ok := unhex(s[i+2]); ok {
+				if _, ok := unhex(s[i+3]); ok {
+					return true
 				}
 			}
 		}

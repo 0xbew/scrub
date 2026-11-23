@@ -318,3 +318,117 @@ func TestAnEmptyBlockScalarHoldsNoValue(t *testing.T) {
 		t.Errorf("the audit refuses %q: %v", Scrub(in, NoDenylist, 4000), hits)
 	}
 }
+
+// A credential's value that opens with a code word or a type word glued by punctuation to more of it
+// (`Fn-DMLYtO2`, `True@Lm9Qx2`, `None-q7Xb2Kd`) is a value, not `fn`, `true` or a `None` annotation: the scrubber kept
+// it after `=` and `:`, and the audit passed the `@` and `: None-` ones. A code word with an operator or a bracket
+// after it stays code.
+func TestACodeWordGluedToAValueIsTheValue(t *testing.T) {
+	d := fakeDenylist(t)
+	cases := []struct{ name, in, body string }{
+		{"lead word, hyphen, mid-sentence", "then db_password = Fn-DMLYtO2 for the call", "Fn-DMLYtO2"},    // gitleaks:allow (synthetic)
+		{"fullwidth, after a command", "echo start ｔｈｅｎ　ｄｂ＿ｐａｓｓｗｏｒｄ　＝　Ｆｎ－ＤＭＬＹｔＯ２　ｆｏｒ　ｔｈｅ　ｃａｌｌ", "ＤＭＬＹｔＯ２"}, // gitleaks:allow (synthetic)
+		{"keyword, at sign, colon", "Then db_password: True@Lm9Qx2 and continue", "True@Lm9Qx2"},           // gitleaks:allow (synthetic)
+		{"type word, hyphen, colon", "db_password: None-q7Xb2Kd", "None-q7Xb2Kd"},                          // gitleaks:allow (synthetic)
+	}
+	for _, c := range cases {
+		assertHidden(t, c.name, c.in, c.body, d)
+	}
+	for _, in := range []string{"token = this->token;", "token = await fetchToken(url)", "token: str|None = None",
+		"type A = {token:string;user:string;}", "password = null;next = 1",
+		"s/^PER_TOKEN = None/OLD_LIMIT/g"} {
+		if out := Scrub(in, d, 4000); out != in {
+			t.Errorf("Scrub(%q) = %q, want it kept", in, out)
+		}
+	}
+}
+
+// A credential's colon value that no colon rule read, so it was sent and the net passed it: glued to the colon at a
+// line's head, after a dotted owner, after `( `, opening with a `$` that is no reference, after a quote that never
+// closes, and mid-sentence with `@` `#` `,` inside it; and a dotted value after `:` or `=` that was read as a member
+// chain though a part of it mixes cases and a digit; and a crypt hash whose parameters hold commas, which the value
+// stopped at, or whose hyphenated head (`$bcrypt-sha256$`) read as a reference. Each is hidden, and the audit refuses it
+// unscrubbed.
+func TestAColonValueOutsideTheColonRulesIsHiddenAndRefused(t *testing.T) {
+	d := fakeDenylist(t)
+	cases := []struct{ name, in, body string }{
+		// A hash or password behind a scheme tag (`{CRYPT}`, `{SSHA}`), which the value stopped at, and LDIF's base64
+		// value after `::`.
+		{"scheme tag, line's head", "password: {CRYPT}$6$rounds=5000$saltsalt$Qz7Kp2Lm9Xa8Bc7De6",
+			"Qz7Kp2Lm9Xa8Bc7De6"}, // gitleaks:allow (synthetic)
+		{"scheme tag mid-sentence", "Then password: {ARGON2}$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHQ$Kq9Lm2Pw7Xc4zzAbCd ok",
+			"Kq9Lm2Pw7Xc4zzAbCd"}, // gitleaks:allow (synthetic)
+		{"scheme tag, code assignment", "password = {SSHA}Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm",
+			"Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm"}, // gitleaks:allow (synthetic)
+		{"scheme tag, `#` opens the password, `:=`", "password := {PLAIN}#Ab12cd34", "Ab12cd34"}, // gitleaks:allow (synthetic)
+		{"LDIF base64 after `::`", "userPassword:: e1BMQUlOfUh1bnRlcjJLcTlMbQ==",
+			"e1BMQUlOfUh1bnRlcjJLcTlMbQ"}, // gitleaks:allow (synthetic)
+		{"glued at a line's head", "password:Ab12cd34x", "Ab12cd34x"},                             // gitleaks:allow (synthetic)
+		{"dotted owner at a line's head", "spring.datasource.password: Ab-CDEFgH2", "Ab-CDEFgH2"}, // gitleaks:allow (synthetic)
+		{"dotted owner after a comma", "Okay, db.password: Ab-CDEFgH2 then", "Ab-CDEFgH2"},        // gitleaks:allow (synthetic)
+		{"bcrypt hash mid-sentence", "Then password: $2b$12$Kq9Lm2Pw7Xc4 ok", "Kq9Lm2Pw7Xc4"},     // gitleaks:allow (synthetic)
+		{"unclosed quote mid-sentence", `Then password: "Ab-CDEFgH2 and continue`, "Ab-CDEFgH2"},  // gitleaks:allow (synthetic)
+		{"blank before the colon", "Then password : Ab@CDEFgH2 and continue", "CDEFgH2"},          // gitleaks:allow (synthetic)
+		{"hash inside, mid-sentence", "Then password: Ab#CDEFgH2 and continue", "CDEFgH2"},        // gitleaks:allow (synthetic)
+		{"dotted, glued at a line's head", "password:Ab.CDEFgH2", "CDEFgH2"},                      // gitleaks:allow (synthetic)
+		{"dotted, mid-sentence", "Then password: Ab.CDEFgH2 and continue", "CDEFgH2"},             // gitleaks:allow (synthetic)
+		{"dotted, code assignment", "token = x9.Kq2Lm.Pw7", "Kq2Lm"},                              // gitleaks:allow (synthetic)
+		// A dotted value with a bracket after a blank, read as a call, and a `#` glued to a crypt head or a scheme tag,
+		// read as a comment.
+		{"dotted, a bracket after a blank, `=`", "password = Ab.CDEFgH2 (rotated)", "CDEFgH2"},   // gitleaks:allow (synthetic)
+		{"dotted, a bracket after a blank, `:=`", "password := Ab.CDEFgH2 (rotated)", "CDEFgH2"}, // gitleaks:allow (synthetic)
+		{"`#` before a crypt head, `:=`", "password := ab#$scrypt$ln=16,r=8$c2FsdHNhbHQ$Kq9Lm2Pw7Xc4zzAbCd",
+			"c2FsdHNhbHQ$Kq9Lm2Pw7Xc4zzAbCd"}, // gitleaks:allow (synthetic)
+		{"`#` opens a crypt hash", "password = #$scrypt$ln=16,r=8$c2FsdHNhbHQ$Kq9Lm2Pw7Xc4zzAbCd",
+			"c2FsdHNhbHQ$Kq9Lm2Pw7Xc4zzAbCd"}, // gitleaks:allow (synthetic)
+		{"`#` opens a scheme tag", "password = #{CRYPT}$6$rounds=5000,x$c2FsdHNhbHQ$Kq9Lm2Pw7Xc4zzAbCd",
+			"c2FsdHNhbHQ$Kq9Lm2Pw7Xc4zzAbCd"}, // gitleaks:allow (synthetic)
+		{"crypt hash with commas, `:=`", "password := $argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHQ$Kq9Lm2Pw7Xc4zzAbCd",
+			"Kq9Lm2Pw7Xc4zzAbCd"}, // gitleaks:allow (synthetic)
+		{"Django's argon2 hash, `=>`", "password => argon2$argon2id$v=19$m=102400,t=2,p=8$Rk9PYmFy$Zx8Wv7Ut6Sr5Qp4On3Ml",
+			"Zx8Wv7Ut6Sr5Qp4On3Ml"}, // gitleaks:allow (synthetic)
+		{"hyphenated crypt hash mid-sentence", "Then password: $bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uku$Kq4Noyk3094Y2QlB8NdRT8SvGiI4ft2 and go",
+			"Kq4Noyk3094Y2QlB8NdRT8SvGiI4ft2"}, // gitleaks:allow (synthetic)
+	}
+	for _, c := range cases {
+		assertHidden(t, c.name, c.in, c.body, d)
+		if hits := Audit(c.in, d); len(hits) == 0 {
+			t.Errorf("%s: Audit(%q) passes it unscrubbed", c.name, c.in)
+		}
+	}
+	for _, in := range []string{"Then password: $DB_PASSWORD2 and continue", "see http://example.com:8080/a",
+		"Then token::Token2x here", "at 10:30 today", "token = cfg.api_key2", "password:cfg.api_key2"} { // gitleaks:allow (synthetic)
+		if out := Scrub(in, d, 4000); out != in {
+			t.Errorf("Scrub(%q) = %q, want it kept", in, out)
+		}
+	}
+}
+
+// A denylisted name whose words are joined by any dash (a Unicode hyphen, an en or em dash, the minus sign) or an
+// invisible format character (a soft hyphen, a zero-width space), or a hyphenated name written with another joiner,
+// is hidden whole, and the audit refuses it unscrubbed.
+func TestANameJoinedByAnyDashIsHiddenAndRefused(t *testing.T) {
+	d := fakeDenylist(t)
+	cases := []struct{ name, in, body string }{
+		{"hyphen U+2010", "ping Vorbel\u2010Trinquas about it", "Vorbel\u2010Trinquas"},
+		{"non-breaking hyphen U+2011", "ping Vorbel\u2011Trinquas about it", "Vorbel\u2011Trinquas"},
+		{"en dash U+2013", "Zo\u00eb\u2013Quillfen reviewed it", "Zo\u00eb\u2013Quillfen"},
+		{"spaced em dash U+2014", "thanks Vorbel \u2014 Trinquas", "Vorbel \u2014 Trinquas"},
+		{"minus sign U+2212", "ping Vorbel\u2212Trinquas", "Vorbel\u2212Trinquas"},
+		{"soft hyphen U+00AD", "ping Vorbel\u00adTrinquas", "Vorbel\u00adTrinquas"},
+		{"zero-width space U+200B", "ping Vorbel\u200bTrinquas", "Vorbel\u200bTrinquas"},
+	}
+	for _, c := range cases {
+		assertHidden(t, c.name, c.in, c.body, d)
+		if hits := Audit(c.in, d); len(hits) == 0 {
+			t.Errorf("%s: Audit(%q) passes it unscrubbed", c.name, c.in)
+		}
+	}
+	hy, err := ParseDenylist([]byte(`{"identities": [{"literal": "Marijo-Tavel Plenkor", "role": "person"}], "vendors": []}`), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range []string{"by Marijo\u2013Tavel Plenkor", "by Marijo Tavel Plenkor", "by MarijoTavel Plenkor"} {
+		assertHidden(t, "hyphenated literal: "+in, in, strings.TrimPrefix(in, "by "), hy)
+	}
+}

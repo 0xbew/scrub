@@ -46,38 +46,55 @@ func cut(text string, limit, length int) string {
 		// Never end on part of a token: it could be the start of a secret or a name.
 		k := strings.LastIndexFunc(head, unicode.IsSpace)
 		kept := strings.TrimRightFunc(head[:k], unicode.IsSpace)
-		// Nor on a name whose value the cut took: `password: …[cut]` reads as a value left.
-		// A hidden value right after such a name reads as more of it with the marker (`TOKEN= <redacted> …[cut]`).
-		for {
-			w := strings.LastIndexFunc(kept, unicode.IsSpace)
-			if w < 0 {
-				break
-			}
-			last := kept[w+1:]
-			if !awaitsValue(last) {
-				rest := strings.TrimRightFunc(kept[:w], unicode.IsSpace)
-				pw := strings.LastIndexFunc(rest, unicode.IsSpace)
-				if !lex.OnlyPlaceholders(strings.Trim(last, "\"'`")) || !awaitsValue(rest[pw+1:]) {
-					break
-				}
-			}
-			kept = strings.TrimRightFunc(kept[:w], unicode.IsSpace)
-		}
-		// Nor where the audit reads the marker as a value left (a name in another form, `＝ …[cut]`, or a
-		// closed value read on into the marker): words go from the end until it passes.
-		// Only what the marker itself causes: a hit already in the kept text is not the cut's to answer.
-		baseHit := secretHit(kept)
-		baseMore := len(reread(kept, false, redetectSecrets).Spans) > 0
-		for (!baseHit && secretHit(kept+" "+Cut)) || (!baseMore && len(reread(kept+" "+Cut, false, redetectSecrets).Spans) > 0) {
-			w := strings.LastIndexFunc(kept, unicode.IsSpace)
-			if w < 0 {
-				return Cut
-			}
-			kept = strings.TrimRightFunc(kept[:w], unicode.IsSpace)
+		kept = trimAwaitingNames(kept)
+		kept, ok := trimForMarker(kept)
+		if !ok {
+			return Cut
 		}
 		return kept + " " + Cut
 	}
 	return text
+}
+
+// trimAwaitingNames: kept without the words at its end that await a value the cut took, nor a
+// placeholder right after such a word.
+func trimAwaitingNames(kept string) string {
+	// Nor on a name whose value the cut took: `password: …[cut]` reads as a value left.
+	// A hidden value right after such a name reads as more of it with the marker (`TOKEN= <redacted> …[cut]`).
+	for {
+		w := strings.LastIndexFunc(kept, unicode.IsSpace)
+		if w < 0 {
+			break
+		}
+		last := kept[w+1:]
+		if !awaitsValue(last) {
+			rest := strings.TrimRightFunc(kept[:w], unicode.IsSpace)
+			pw := strings.LastIndexFunc(rest, unicode.IsSpace)
+			if !lex.OnlyPlaceholders(strings.Trim(last, "\"'`")) || !awaitsValue(rest[pw+1:]) {
+				break
+			}
+		}
+		kept = strings.TrimRightFunc(kept[:w], unicode.IsSpace)
+	}
+	return kept
+}
+
+// trimForMarker: kept without the words at its end that make the audit read the marker after
+// it as a value left; false when no word is left to drop.
+func trimForMarker(kept string) (string, bool) {
+	// Nor where the audit reads the marker as a value left (a name in another form, `＝ …[cut]`, or a
+	// closed value read on into the marker): words go from the end until it passes.
+	// Only what the marker itself causes: a hit already in the kept text is not the cut's to answer.
+	baseHit := secretHit(kept)
+	baseMore := len(reread(kept, false, redetectSecrets).Spans) > 0
+	for (!baseHit && secretHit(kept+" "+Cut)) || (!baseMore && len(reread(kept+" "+Cut, false, redetectSecrets).Spans) > 0) {
+		w := strings.LastIndexFunc(kept, unicode.IsSpace)
+		if w < 0 {
+			return "", false
+		}
+		kept = strings.TrimRightFunc(kept[:w], unicode.IsSpace)
+	}
+	return kept, true
 }
 
 // redetectSecrets: the secret detectors over a text, as a cut output is read again.

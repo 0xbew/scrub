@@ -49,54 +49,74 @@ func (c *Scan) longRuns() {
 			continue
 		}
 		start := i
-		count := 0
-		j := i
-		var plain strings.Builder
-		for j < len(s) {
-			if isRunChar(s[j]) {
-				plain.WriteByte(s[j])
-				count++
-				j++
-				continue
-			}
-			if n := lex.ContAt(s, j); n > 0 {
-				k := SkipConts(s, j)
-				if k < len(s) && isRunChar(s[k]) {
-					j = k
-					continue
-				}
-			}
-			break
-		}
-		end := j
-		eq := 0
-		for end < len(s) && s[end] == '=' && eq < 2 {
-			end++
-			eq++
-		}
+		j, body, count := runEnd(s, i)
+		end, eq := padEnd(s, j)
 		i = j
 		if count < 32 {
 			continue
 		}
-		body := plain.String()
-		if !hasDigitAndAlphaASCII(body) {
-			continue
+		if longRunGoes(s, start, end, eq, body) {
+			c.Hide(start, end, span.KindLong)
 		}
-		token := s[start:end]
-		if vocab.IsIdentifier(token) && vocab.WrittenAsCode(s, start, end) {
-			continue
-		}
-		after := byte(0)
-		if end < len(s) {
-			after = s[end]
-		}
-		trim := strings.Trim(body, "/")
-		if eq == 0 && (after == '.' || after == '-') && strings.Contains(trim, "/") && !strings.Contains(body, "+") &&
-			!strings.Contains(token, "\\") && vocab.Wordlike(body, vocab.IsPathSep) {
-			continue
-		}
-		c.Hide(start, end, span.KindLong)
 	}
+}
+
+// runEnd: the end of the run of token characters from i, joined across continuations, with the run's
+// characters (continuations left out) and how many there are.
+func runEnd(s string, i int) (int, string, int) {
+	count := 0
+	j := i
+	var plain strings.Builder
+	for j < len(s) {
+		if isRunChar(s[j]) {
+			plain.WriteByte(s[j])
+			count++
+			j++
+			continue
+		}
+		if n := lex.ContAt(s, j); n > 0 {
+			k := SkipConts(s, j)
+			if k < len(s) && isRunChar(s[k]) {
+				j = k
+				continue
+			}
+		}
+		break
+	}
+	return j, plain.String(), count
+}
+
+// padEnd: past up to two `=` of base64 padding at j, and how many.
+func padEnd(s string, j int) (int, int) {
+	end := j
+	eq := 0
+	for end < len(s) && s[end] == '=' && eq < 2 {
+		end++
+		eq++
+	}
+	return end, eq
+}
+
+// longRunGoes: whether a long run (start to end, eq padding, body its characters) is hidden: it holds a letter
+// and a digit, and is neither an identifier written as code nor a path.
+func longRunGoes(s string, start, end, eq int, body string) bool {
+	if !hasDigitAndAlphaASCII(body) {
+		return false
+	}
+	token := s[start:end]
+	if vocab.IsIdentifier(token) && vocab.WrittenAsCode(s, start, end) {
+		return false
+	}
+	after := byte(0)
+	if end < len(s) {
+		after = s[end]
+	}
+	trim := strings.Trim(body, "/")
+	if eq == 0 && (after == '.' || after == '-') && strings.Contains(trim, "/") && !strings.Contains(body, "+") &&
+		!strings.Contains(token, "\\") && vocab.Wordlike(body, vocab.IsPathSep) {
+		return false
+	}
+	return true
 }
 
 // HasLongRun: the long-run rule fires somewhere in a reading (the audit's check; it shares

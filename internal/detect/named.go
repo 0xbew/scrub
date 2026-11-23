@@ -23,51 +23,67 @@ func (c *Scan) named() {
 			c.spacedKeywordAssignment(p)
 			continue
 		} else if p > 0 && (s[p-1] == '"' || s[p-1] == '\'') {
-			// A quoted name before `=`: `"DB_PASSWORD"=x`, `\"token\"=x`.
-			e := p - 1
-			for e > 0 && s[e-1] == '\\' {
-				e--
-			}
-			q2 := lex.NameRunBefore(s, e)
-			if q2 == e || q2 == 0 || s[q2-1] != s[p-1] {
-				continue
-			}
-			name = lex.TrimDashes(s[q2:e])
-			if !vocab.IsCredentialName(name) {
-				continue
-			}
-			ve := lex.ValueEnd(s, vs)
-			c.hideValue(vs, ve)
+			c.quotedNameAssignment(p, vs)
 			continue
 		} else {
 			continue
 		}
-		if name == "" || !(lex.IsAlnumASCII(name[0]) || name[0] == '_') {
-			continue
+		outerEnd, depth = c.namedValue(name, q, vs, outerEnd, depth)
+	}
+}
+
+// quotedNameAssignment: a quoted name before the `=` at p (`"DB_PASSWORD"=x`, `\"token\"=x`):
+// the value at vs, when the name is a credential's.
+func (c *Scan) quotedNameAssignment(p, vs int) {
+	s := c.S
+	// A quoted name before `=`: `"DB_PASSWORD"=x`, `\"token\"=x`.
+	e := p - 1
+	for e > 0 && s[e-1] == '\\' {
+		e--
+	}
+	q2 := lex.NameRunBefore(s, e)
+	if q2 == e || q2 == 0 || s[q2-1] != s[p-1] {
+		return
+	}
+	name := lex.TrimDashes(s[q2:e])
+	if !vocab.IsCredentialName(name) {
+		return
+	}
+	ve := lex.ValueEnd(s, vs)
+	c.hideValue(vs, ve)
+}
+
+// namedValue: the value at vs of the name read from q, hidden when judged a credential's or
+// nested too deep (an empty one: a value on the next line); the outer assignment's end and the
+// nesting depth carried to the next `=`.
+func (c *Scan) namedValue(name string, q, vs, outerEnd, depth int) (int, int) {
+	s := c.S
+	if name == "" || !nameStartByte(name[0]) {
+		return outerEnd, depth
+	}
+	ve := lex.ValueEnd(s, vs)
+	if ve == vs {
+		c.nextLineValue(name, vs)
+		return outerEnd, depth
+	}
+	if HasKeyword(name) {
+		// Assignments nested in one value are followed this deep; past it the value goes.
+		if q < outerEnd {
+			depth++
+		} else {
+			depth = 0
 		}
-		ve := lex.ValueEnd(s, vs)
-		if ve == vs {
-			c.nextLineValue(name, vs)
-			continue
-		}
-		if HasKeyword(name) {
-			// Assignments nested in one value are followed this deep; past it the value goes.
-			if q < outerEnd {
-				depth++
-			} else {
-				depth = 0
-			}
-			if ve > outerEnd {
-				outerEnd = ve
-			}
-		}
-		if judged(name, s[vs:ve]) || (c.R.Pctd && judged(name, c.sourceText(vs, ve))) || depth >= maxNestedAssignments {
-			c.hideValue(vs, ve)
-			if c.R.Pctd {
-				c.extendEncoded(vs, ve)
-			}
+		if ve > outerEnd {
+			outerEnd = ve
 		}
 	}
+	if judged(name, s[vs:ve]) || (c.R.Pctd && judged(name, c.sourceText(vs, ve))) || depth >= maxNestedAssignments {
+		c.hideValue(vs, ve)
+		if c.R.Pctd {
+			c.extendEncoded(vs, ve)
+		}
+	}
+	return outerEnd, depth
 }
 
 // nextLineValue: a credential's empty assignment ending its line (`TOKEN=`) and a quoted string opening the next

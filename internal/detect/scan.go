@@ -165,21 +165,32 @@ func gluedPartEnd(s string, i, b int) int {
 		j++
 	}
 	if j < b && (s[j] == '"' || s[j] == '\'') {
-		q := s[j]
-		k := j + 1
-		for k < b && s[k] != '\n' {
-			if q == '"' && s[k] == '\\' && k+1 < b && j == i {
-				k += 2
-				continue
-			}
-			if s[k] == q {
-				return k + 1
-			}
-			k++
-		}
-		return k
+		return gluedQuotedEnd(s, j, b, j == i)
 	}
-	j = i
+	return gluedRunEnd(s, i, b)
+}
+
+// gluedQuotedEnd: a quoted part whose quote is at j, to its closing quote or the line end (b at most); in a raw
+// (unescaped) `"` part a backslash escapes the byte after it.
+func gluedQuotedEnd(s string, j, b int, raw bool) int {
+	q := s[j]
+	k := j + 1
+	for k < b && s[k] != '\n' {
+		if q == '"' && s[k] == '\\' && k+1 < b && raw {
+			k += 2
+			continue
+		}
+		if s[k] == q {
+			return k + 1
+		}
+		k++
+	}
+	return k
+}
+
+// gluedRunEnd: an unquoted run from i up to a word break, a quote, or backslashes before a quote.
+func gluedRunEnd(s string, i, b int) int {
+	j := i
 	for j < b && !isGluedBreak(s[j]) && s[j] != '"' && s[j] != '\'' {
 		if s[j] == '\\' {
 			k := j

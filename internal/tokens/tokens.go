@@ -66,57 +66,12 @@ func init() {
 	}
 	prefixes := map[string]bool{}
 	for _, f := range table.Formats {
-		var b strings.Builder
-		// A format that opens with its body (`<id>:A…`, `<14>.atlasv1.…`) has no word start to
-		// anchor on: the body may be glued to a word (`bot123456:A…` in a Telegram URL).
-		if f.Segments[0].Text != nil && !gluedFormat(f.Segments) {
-			b.WriteString(`\b`)
-		}
-		key := ""
-		for i, seg := range f.Segments {
-			if seg.Text != nil {
-				if key == "" {
-					key = strings.ToLower(*seg.Text)
-				}
-				if i > 0 {
-					b.WriteString(contRx)
-				}
-				t := regexp.QuoteMeta(*seg.Text)
-				if seg.IgnoreCase {
-					t = "(?i:" + t + ")"
-				}
-				b.WriteString(t)
-				continue
-			}
-			lo := 0
-			if seg.Min != nil {
-				lo = *seg.Min
-			}
-			count := "{" + strconv.Itoa(lo) + ","
-			if seg.Max != nil {
-				count += strconv.Itoa(*seg.Max)
-			}
-			count += "}"
-			if i == 0 {
-				b.WriteString(charClass(*seg.Chars) + count)
-				continue
-			}
-			// A continuation may sit before any character after the prefix.
-			b.WriteString("(?:" + contRx + charClass(*seg.Chars) + ")" + count)
-		}
+		pattern, key := formatPattern(f.Segments)
 		if key == "" {
 			panic("scrub: tokens.json: format " + f.ID + " has no fixed text")
 		}
-		tokenFormats = append(tokenFormats, tokenFormat{rule: f.ID, key: key, rx: regexp.MustCompile(b.String())})
-		if f.Segments[0].Text == nil {
-			continue
-		}
-		p := *f.Segments[0].Text
-		if f.Segments[0].IgnoreCase {
-			p = strings.ToLower(p)
-		}
-		p = strings.NewReplacer("-", "_", ".", "_").Replace(p)
-		if identPrefixRx.MatchString(p) {
+		tokenFormats = append(tokenFormats, tokenFormat{rule: f.ID, key: key, rx: regexp.MustCompile(pattern)})
+		if p, ok := identPrefix(f.Segments[0]); ok {
 			prefixes[p] = true
 		}
 	}
@@ -124,6 +79,76 @@ func init() {
 		IdentPrefixes = append(IdentPrefixes, p)
 	}
 	sort.Strings(IdentPrefixes)
+}
+
+// formatPattern builds one format's regex and its key: the first fixed text, lowercased ("" when it has none).
+func formatPattern(segs []TokenSegment) (string, string) {
+	var b strings.Builder
+	// A format that opens with its body (`<id>:A…`, `<14>.atlasv1.…`) has no word start to
+	// anchor on: the body may be glued to a word (`bot123456:A…` in a Telegram URL).
+	if segs[0].Text != nil && !gluedFormat(segs) {
+		b.WriteString(`\b`)
+	}
+	key := ""
+	for i, seg := range segs {
+		if seg.Text != nil {
+			if key == "" {
+				key = strings.ToLower(*seg.Text)
+			}
+			b.WriteString(textPattern(i, seg))
+			continue
+		}
+		b.WriteString(runPattern(i, seg))
+	}
+	return b.String(), key
+}
+
+// textPattern: a fixed text, quoted, case-folded when the format says so; a continuation may sit before any but the first.
+func textPattern(i int, seg TokenSegment) string {
+	t := regexp.QuoteMeta(*seg.Text)
+	if seg.IgnoreCase {
+		t = "(?i:" + t + ")"
+	}
+	if i > 0 {
+		return contRx + t
+	}
+	return t
+}
+
+// runPattern: a run of the segment's characters, between its bounds; after the first segment a continuation may
+// sit before any of them.
+func runPattern(i int, seg TokenSegment) string {
+	lo := 0
+	if seg.Min != nil {
+		lo = *seg.Min
+	}
+	count := "{" + strconv.Itoa(lo) + ","
+	if seg.Max != nil {
+		count += strconv.Itoa(*seg.Max)
+	}
+	count += "}"
+	if i == 0 {
+		return charClass(*seg.Chars) + count
+	}
+	// A continuation may sit before any character after the prefix.
+	return "(?:" + contRx + charClass(*seg.Chars) + ")" + count
+}
+
+// identPrefix: the prefix a format opens with, as it would read inside an identifier (lowercased when case-free,
+// `-` and `.` as `_`); false when the format opens with its body or the prefix cannot stand in a name.
+func identPrefix(seg TokenSegment) (string, bool) {
+	if seg.Text == nil {
+		return "", false
+	}
+	p := *seg.Text
+	if seg.IgnoreCase {
+		p = strings.ToLower(p)
+	}
+	p = strings.NewReplacer("-", "_", ".", "_").Replace(p)
+	if identPrefixRx.MatchString(p) {
+		return p, true
+	}
+	return "", false
 }
 
 // gluedFormat: a format distinctive enough to read even glued to a word before it (`prod_AKIA…`, `x_sk_live_…`,

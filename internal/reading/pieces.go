@@ -31,77 +31,114 @@ func (p *pieces) reading() *Reading {
 // code's; a hunk that stops short, and every other line, read as written. Each is a reading
 // mapped onto text, so the scrubber hides what the audit finds there.
 func PhoneReadings(text string) []*Reading {
-	var out []*Reading
-	type line struct{ start, end int }
-	var written []line
-	type held struct {
-		line   line
-		marker string
-	}
-	var hold []held
-	join := func(ls []line) *Reading {
-		p := &pieces{src: text}
-		for _, l := range ls {
-			p.add(l.start, l.end)
-		}
-		return p.reading()
-	}
-	oldN, newN := 0, 0
+	h := &hunkSides{text: text}
 	for _, ln := range lex.DiffLines(text) {
-		l := line{ln.Start, ln.End}
-		marker := ""
-		if ln.End > ln.Start {
-			marker = text[ln.Start : ln.Start+1]
-		}
-		if oldN > 0 || newN > 0 {
-			row := (marker == "+" && newN > 0) || (marker == "-" && oldN > 0) ||
-				((marker == " " || marker == "\n" || marker == "\r") && oldN > 0 && newN > 0)
-			if row || marker == "\\" {
-				if row {
-					if marker != "+" {
-						oldN--
-					}
-					if marker != "-" {
-						newN--
-					}
-				}
-				hold = append(hold, held{l, marker})
-				if oldN == 0 && newN == 0 {
-					out = append(out, join(written))
-					for _, side := range []string{"+", "-"} {
-						p := &pieces{src: text}
-						for _, h := range hold {
-							if h.marker == side || h.marker == " " || h.marker == "\n" || h.marker == "\r" {
-								if h.marker == "+" || h.marker == "-" || h.marker == " " {
-									p.add(h.line.start+1, h.line.end)
-								} else {
-									p.add(h.line.start, h.line.end)
-								}
-							}
-						}
-						out = append(out, p.reading())
-					}
-					for _, h := range hold {
-						if h.marker == "\\" {
-							out = append(out, join([]line{h.line}))
-						}
-					}
-					written, hold = nil, nil
-				}
-				continue
-			}
-			for _, h := range hold {
-				written = append(written, h.line)
-			}
-			hold, oldN, newN = nil, 0, 0
-		}
-		if o, n, _, ok := lex.HunkHeader(text[ln.Start:ln.Body]); ok {
-			oldN, newN = o, n
-		}
-		written = append(written, l)
+		h.line(ln)
 	}
-	for _, h := range hold {
-		written = append(written, h.line)
+	h.releaseHeld()
+	return append(h.out, h.join(h.written))
+}
+
+type textLine struct{ start, end int }
+
+type heldLine struct {
+	line   textLine
+	marker string
+}
+
+// hunkSides splits a text into the readings PhoneReadings returns, one line at a time: the lines read as
+// written so far, and the rows of the hunk being read, held until it is whole.
+type hunkSides struct {
+	text       string
+	out        []*Reading
+	written    []textLine
+	hold       []heldLine
+	oldN, newN int
+}
+
+func (h *hunkSides) join(ls []textLine) *Reading {
+	p := &pieces{src: h.text}
+	for _, l := range ls {
+		p.add(l.start, l.end)
 	}
-	return append(out, join(written))
+	return p.reading()
+}
+
+func (h *hunkSides) line(ln lex.DiffLine) {
+	text := h.text
+	l := textLine{ln.Start, ln.End}
+	marker := ""
+	if ln.End > ln.Start {
+		marker = text[ln.Start : ln.Start+1]
+	}
+	if h.oldN > 0 || h.newN > 0 {
+		if h.hunkRow(l, marker) {
+			return
+		}
+	}
+	if o, n, _, ok := lex.HunkHeader(text[ln.Start:ln.Body]); ok {
+		h.oldN, h.newN = o, n
+	}
+	h.written = append(h.written, l)
+}
+
+// hunkRow holds the line l when it is a row of the hunk being read (or a `\` note) and reports so; else the
+// hunk stopped short, and its held rows read as written.
+func (h *hunkSides) hunkRow(l textLine, marker string) bool {
+	row := (marker == "+" && h.newN > 0) || (marker == "-" && h.oldN > 0) ||
+		((marker == " " || marker == "\n" || marker == "\r") && h.oldN > 0 && h.newN > 0)
+	if row || marker == "\\" {
+		if row {
+			if marker != "+" {
+				h.oldN--
+			}
+			if marker != "-" {
+				h.newN--
+			}
+		}
+		h.hold = append(h.hold, heldLine{l, marker})
+		if h.oldN == 0 && h.newN == 0 {
+			h.wholeHunk()
+		}
+		return true
+	}
+	h.releaseHeld()
+	h.hold, h.oldN, h.newN = nil, 0, 0
+	return false
+}
+
+// wholeHunk: the lines read as written before the hunk, then each side of it, then its `\` notes.
+func (h *hunkSides) wholeHunk() {
+	h.out = append(h.out, h.join(h.written))
+	for _, side := range []string{"+", "-"} {
+		h.out = append(h.out, h.side(side))
+	}
+	for _, x := range h.hold {
+		if x.marker == "\\" {
+			h.out = append(h.out, h.join([]textLine{x.line}))
+		}
+	}
+	h.written, h.hold = nil, nil
+}
+
+// side: the held rows of one side of the hunk and its context rows, a marked row without its marker.
+func (h *hunkSides) side(side string) *Reading {
+	p := &pieces{src: h.text}
+	for _, x := range h.hold {
+		if x.marker == side || x.marker == " " || x.marker == "\n" || x.marker == "\r" {
+			if x.marker == "+" || x.marker == "-" || x.marker == " " {
+				p.add(x.line.start+1, x.line.end)
+			} else {
+				p.add(x.line.start, x.line.end)
+			}
+		}
+	}
+	return p.reading()
+}
+
+// releaseHeld: the held rows read as written.
+func (h *hunkSides) releaseHeld() {
+	for _, x := range h.hold {
+		h.written = append(h.written, x.line)
+	}
 }

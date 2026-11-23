@@ -24,15 +24,22 @@ func ColonStop(s string, i int) bool {
 var typeWords = []string{"str", "bytes", "int", "float", "bool", "None", "Any", "Optional", "Union", "SecretStr", "string",
 	"number", "boolean", "undefined"}
 
-// IsTypeWord: a type annotation's word at i (`token: str`).
+// IsTypeWord reports whether a type annotation's word stands at i (`token: str`, `token: str|None`), not the
+// head of a value glued to it by other punctuation (`password: None-q7Xb2`).
 func IsTypeWord(s string, i int) bool {
 	for _, w := range typeWords {
-		if len(s)-i >= len(w) && strings.EqualFold(s[i:i+len(w)], w) && !lex.IsWordAt(s, i+len(w)) {
+		n := i + len(w)
+		if len(s)-i >= len(w) && strings.EqualFold(s[i:n], w) && !lex.IsWordAt(s, n) &&
+			(!gluedToWord(s, n) || strings.IndexByte(typeJoiners, s[n]) >= 0) {
 			return true
 		}
 	}
 	return false
 }
+
+// typeJoiners: what joins a type word to the next in an annotation or ends it (`str|None`, `Dict<str,int>`, `int=0`,
+// `str.x`, `{token:string;user:string}`).
+const typeJoiners = "|&,=?<>.;"
 
 // IsBlockIndicator: a YAML block scalar's `|` or `>` ends the line (`key: |`).
 func IsBlockIndicator(s string, i int) bool {
@@ -164,80 +171,109 @@ func colonWords(s string, i int, flow, tight bool) int {
 func (c *Scan) colon() {
 	s := c.S
 	for p := strings.IndexByte(s, ':'); p >= 0; p = lex.NextByte(s, ':', p+1) {
-		// The name: blanks, then a run (possibly quoted) before the colon.
-		e := p
-		for e > 0 && (s[e-1] == ' ' || s[e-1] == '\t') {
-			e--
+		c.colonAt(p)
+	}
+}
+
+// colonAt: the colon at p, with the name before it and the value after it.
+func (c *Scan) colonAt(p int) {
+	s := c.S
+	qe, quoted := colonNameEnd(s, p)
+	q := lex.NameRunBefore(s, qe)
+	if q == qe {
+		// JSON with a line break or continuation before the colon.
+		if jq, je, ok := c.quotedNameBeforeColon(p); ok {
+			c.jsonField(jq, je, p)
 		}
-		quoted := false
-		qe := e
-		if e > 0 && (s[e-1] == '"' || s[e-1] == '\'') {
-			quoted = true
-			qe = e - 1
-			for qe > 0 && s[qe-1] == '\\' {
-				qe--
-			}
+		return
+	}
+	name := lex.TrimDashes(s[q:qe])
+	if name == "" {
+		return
+	}
+	if quoted {
+		if q > 0 && (s[q-1] == '"' || s[q-1] == '\'') {
+			c.jsonField(q, qe, p)
+			c.objectAfter(name, p)
 		}
-		q := lex.NameRunBefore(s, qe)
-		if q == qe {
-			// JSON with a line break or continuation before the colon.
-			if jq, je, ok := c.quotedNameBeforeColon(p); ok {
-				c.jsonField(jq, je, p)
-			}
-			continue
+		return
+	}
+	c.schemeAssigned(q, name, p)
+	lineHead, flow, tight := colonContext(s, q)
+	if !lineHead && !flow && !tight {
+		c.midColon(name, q, p)
+		return
+	}
+	if ls := lex.LineStart(s, q); lineHead && !flow && !tight && strings.Trim(s[ls:q], " \t+-") != "" {
+		c.quotedHeadValue(name, ls, q, p)
+		return
+	}
+	c.objectAfter(name, p)
+	if lineHead && !flow && !tight && lex.LDIFBase64Colon(s, p) {
+		c.colonValueAfter(name, p+1, true, false, false)
+		return
+	}
+	if lineHead && !flow && !tight && p+1 < len(s) && s[p+1] != ' ' && s[p+1] != '\t' {
+		// Glued at a line's head (`password:Ab12cd34`): one word, read as in a sentence.
+		c.midColon(name, q, p)
+		return
+	}
+	c.colonValueAfter(name, p, lineHead, flow, tight)
+}
+
+// colonNameEnd: the name before the colon at p: blanks, then a run (possibly quoted). Returns where the run
+// ends and whether a quote closes it (then the end is before the quote and the escapes before it).
+func colonNameEnd(s string, p int) (int, bool) {
+	e := p
+	for e > 0 && (s[e-1] == ' ' || s[e-1] == '\t') {
+		e--
+	}
+	quoted := false
+	qe := e
+	if e > 0 && (s[e-1] == '"' || s[e-1] == '\'') {
+		quoted = true
+		qe = e - 1
+		for qe > 0 && s[qe-1] == '\\' {
+			qe--
 		}
-		name := lex.TrimDashes(s[q:qe])
-		if name == "" {
-			continue
+	}
+	return qe, quoted
+}
+
+// quotedHeadValue: a head only a quoted string admits (`echo "password: x"`): one word, ended where the string
+// closes (on its line, or a continued one); an empty string, a `$` reference or an object holds no value here.
+func (c *Scan) quotedHeadValue(name string, ls, q, p int) {
+	s := c.S
+	if cl := quotedHeadCloser(s, ls, q); cl != "" {
+		v := lex.SkipBlanks(s, p+1)
+		k := closerIndex(s[p+1:ContLineEnd(s, p)], cl)
+		if v == p+1 || k < 0 || p+1+k <= v || s[v] == '$' || opensObject(s, v) || IsTypeWord(s, v) {
+			return
 		}
-		if quoted {
-			if q > 0 && (s[q-1] == '"' || s[q-1] == '\'') {
-				c.jsonField(q, qe, p)
-				c.objectAfter(name, p)
-			}
-			continue
-		} else {
-			c.schemeAssigned(q, name, p)
+		end := min(lex.ValueEnd(s, v), p+1+k)
+		// The string's receiver reads a line of its own, so the name is judged as at a line's head.
+		if judged(name, s[v:end]) {
+			c.hideColonBody(v, end, false)
 		}
-		lineHead, flow, tight := colonContext(s, q)
-		if !lineHead && !flow && !tight {
-			c.midColon(name, q, p)
-			continue
+	}
+}
+
+// colonValueAfter: the value after the colon at p, spaced at a line's head or in an object literal, or glued
+// to it in a tight object literal.
+func (c *Scan) colonValueAfter(name string, p int, lineHead, flow, tight bool) {
+	s := c.S
+	vs := p + 1
+	spaced := vs < len(s) && (s[vs] == ' ' || s[vs] == '\t')
+	if spaced && (lineHead || flow) {
+		v := lex.SkipBlanks(s, vs)
+		if v >= len(s) || IsTypeWord(s, v) || opensObject(s, v) || IsBlockIndicator(s, v) {
+			return
 		}
-		// A head only a quoted string admits (`echo "password: x"`): one word, ended where the string closes (on
-		// its line, or a continued one); an empty string, a `$` reference or an object holds no value here.
-		if ls := lex.LineStart(s, q); lineHead && !flow && !tight && strings.Trim(s[ls:q], " \t+-") != "" {
-			if cl := quotedHeadCloser(s, ls, q); cl != "" {
-				v := lex.SkipBlanks(s, p+1)
-				k := closerIndex(s[p+1:ContLineEnd(s, p)], cl)
-				if v == p+1 || k < 0 || p+1+k <= v || s[v] == '$' || s[v] == '{' || IsTypeWord(s, v) {
-					continue
-				}
-				end := lex.ValueEnd(s, v)
-				if end > p+1+k {
-					end = p + 1 + k
-				}
-				// The string's receiver reads a line of its own, so the name is judged as at a line's head.
-				if judged(name, s[v:end]) {
-					c.hideColonBody(v, end, false)
-				}
-			}
-			continue
+		c.colonValue(name, v, flow && !lineHead, false)
+	} else if !spaced && tight {
+		if vs >= len(s) || opensObject(s, vs) || IsBlockIndicator(s, vs) || IsTypeWord(s, vs) {
+			return
 		}
-		c.objectAfter(name, p)
-		vs := p + 1
-		spaced := vs < len(s) && (s[vs] == ' ' || s[vs] == '\t')
-		if spaced && (lineHead || flow) {
-			v := lex.SkipBlanks(s, vs)
-			if v >= len(s) || IsTypeWord(s, v) || s[v] == '{' || IsBlockIndicator(s, v) {
-				continue
-			}
-			c.colonValue(name, v, flow && !lineHead, false)
-		} else if !spaced && tight {
-			if vs >= len(s) || s[vs] == '{' || IsBlockIndicator(s, vs) || IsTypeWord(s, vs) {
-				continue
-			}
-			c.colonValue(name, vs, true, true)
-		}
+		c.colonValue(name, vs, true, true)
 	}
 }
