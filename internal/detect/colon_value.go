@@ -102,6 +102,28 @@ func (c *Scan) jsonField(q, qe, p int) {
 	c.Hide(v+1, body, span.KindSecret)
 }
 
+// quotedNameBareValue: a bare value after a credential's quoted name and its colon (`'password': Ab.CDEFgH2`, a YAML
+// key in quotes) reads as code's assignment reads it: code (`cfg.secret`, `getpass()`, `None`) is kept, a value goes.
+// The name's own word is a variable (`{'token': token}`). A literal, an array or an object is read by the rules above.
+func (c *Scan) quotedNameBareValue(name string, q, qe, p int) {
+	s := c.S
+	v := lex.SkipBlanks(s, p+1)
+	if !vocab.IsCredentialName(name) || v >= len(s) || s[v] == '[' || opensObject(s, v) || IsTypeWord(s, v) ||
+		IsBlockIndicator(s, v) || lex.OwnNameAt(s, v, s[q:qe]) {
+		return
+	}
+	// Only a name first on its line reads every word to a stop word; finding the line's start from each name of a
+	// long line would read the line once per name.
+	j := q - 1
+	for j > 0 && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '+' || s[j-1] == '-') {
+		j--
+	}
+	if j == 0 || s[j-1] == '\n' {
+		c.lineStartValue(q, v)
+	}
+	c.codeValue(v, q, qe)
+}
+
 // escapedAt: the character at i is escaped by an odd run of backslashes before it.
 func escapedAt(s string, i int) bool {
 	n := 0

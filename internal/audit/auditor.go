@@ -216,6 +216,7 @@ func (a *auditor) colonAt(p int) {
 	v := lex.SkipSpaceConts(s, p+1)
 	if quoted && q > 0 && (s[q-1] == '"' || s[q-1] == '\'') {
 		a.jsonField(name, v)
+		a.quotedNameBareValue(name, p)
 		return
 	}
 	if !vocab.IsCredentialName(name) {
@@ -236,6 +237,18 @@ func (a *auditor) colonAt(p int) {
 		return
 	}
 	a.colonValue(name, w, flow)
+}
+
+// quotedNameBareValue: a credential's quoted name's bare value after the colon at p, read as code's assignment is (the
+// scrubber's quotedNameBareValue).
+func (a *auditor) quotedNameBareValue(name string, p int) {
+	s := a.s
+	w := lex.SkipBlanks(s, p+1)
+	if !vocab.IsCredentialName(name) || w >= len(s) || s[w] == '[' || s[w] == '{' && lex.SchemeTagEnd(s, w) < 0 ||
+		detect.IsTypeWord(s, w) || detect.IsBlockIndicator(s, w) || lex.OwnNameAt(s, w, name) {
+		return
+	}
+	a.codeBareValue(w)
 }
 
 // colonNameEnd: where the name before the colon at p ends, past blanks, and whether a quote closes it (then

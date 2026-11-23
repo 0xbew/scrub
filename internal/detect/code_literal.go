@@ -207,8 +207,8 @@ func StartsPlaceholder(s string, i int) bool {
 	return strings.HasPrefix(s[j:], "<redacted>") || strings.HasPrefix(s[j:], "<long-token>")
 }
 
-// CodeWordEnd returns where the code word at i ends: `[^\s;,)\]}#"'`\\]+`, past a scheme tag at i (`{SSHA}`), after
-// which a `#` is the password's, not a comment's (`{PLAIN}#pw`). From a crypt hash's head on (`$argon2id$`,
+// CodeWordEnd returns where the code word at i ends: `[^\s;,)\]}#"'`\\]+`, past a scheme tag at i or glued later in
+// the word (`{SSHA}…`, `y{SSHA}…`), after which a `#` is the password's, not a comment's (`{PLAIN}#pw`). From a crypt hash's head on (`$argon2id$`,
 // `argon2$argon2id$`), the word takes its parameters' commas (`m=65536,t=3,p=4`) to a blank, a quote or a backslash,
 // its trailing punctuation left. A `#` before a crypt head or a `#{TAG}` later in its word (`ab#$scrypt$…`,
 // `#{CRYPT}$6$…`) is the hash's, not a comment.
@@ -219,6 +219,10 @@ func CodeWordEnd(s string, i int) int {
 	}
 	for j < len(s) && !lex.IsSpaceByte(s[j]) {
 		if te := hashTagEnd(s, j); te > 0 {
+			j, stop = te, ";,)]}\"'`\\"
+			continue
+		}
+		if te := lex.SchemeTagEnd(s, j); te > 0 {
 			j, stop = te, ";,)]}\"'`\\"
 			continue
 		}
@@ -246,8 +250,8 @@ func hashTagEnd(s string, j int) int {
 	return lex.SchemeTagEnd(s, j+1)
 }
 
-// hashedHeadAt: for a `#` at j, where the crypt head (`#$scrypt$`, `x#y$argon2id$`) or the `#` glued to a scheme tag
-// (`a#b#{PLAIN}pw`) that makes it the hash's stands later in its word, or -1. The word runs to a blank or a stop.
+// hashedHeadAt: for a `#` at j, where the crypt head (`#$scrypt$`, `x#y$argon2id$`) or the scheme tag (`a#b#{PLAIN}pw`,
+// `x#y{SSHA}…`) that makes it the hash's stands later in its word, or -1. The word runs to a blank or a stop.
 func hashedHeadAt(s string, j int) int {
 	if s[j] != '#' {
 		return -1
@@ -259,7 +263,7 @@ func hashedHeadAt(s string, j int) int {
 				return k
 			}
 			return -1
-		case hashTagEnd(s, k) > 0:
+		case hashTagEnd(s, k) > 0, lex.SchemeTagEnd(s, k) > 0:
 			return k
 		}
 	}

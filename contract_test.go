@@ -389,6 +389,22 @@ func TestAColonValueOutsideTheColonRulesIsHiddenAndRefused(t *testing.T) {
 			"Zx8Wv7Ut6Sr5Qp4On3Ml"}, // gitleaks:allow (synthetic)
 		{"hyphenated crypt hash mid-sentence", "Then password: $bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uku$Kq4Noyk3094Y2QlB8NdRT8SvGiI4ft2 and go",
 			"Kq4Noyk3094Y2QlB8NdRT8SvGiI4ft2"}, // gitleaks:allow (synthetic)
+		// A bare value after a credential's quoted name and its colon (a dict or a YAML key in quotes), and a scheme tag
+		// after other characters of its word, which the code word stopped at.
+		{"quoted name, dotted value", "'password': Ab.CDEFgH2", "CDEFgH2"},                                  // gitleaks:allow (synthetic)
+		{"quoted name, a value opening with the name", `{"password": password-hunter2}`, "hunter2"},         // gitleaks:allow (synthetic)
+		{"quoted name, a note after a blank", `"password": Ab.CDEFgH2 (rotated)`, "CDEFgH2"},                // gitleaks:allow (synthetic)
+		{"quoted name in an object literal", `x = {"api_key": Kq9Lm2Pw7Xc, "region": "us"}`, "Kq9Lm2Pw7Xc"}, // gitleaks:allow (synthetic)
+		{"scheme tag after a prefix, `:=`", "password := y{SSHA}Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm",
+			"Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm"}, // gitleaks:allow (synthetic)
+		{"scheme tag after a prefix, quoted name", `"password": x#y{SSHA}Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm`,
+			"Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm"}, // gitleaks:allow (synthetic)
+		// A password hash its own format names, with no credential's name before it.
+		{"crypt hash in a sentence", "the hash is $argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHQ$Kq9Lm2Pw7Xc4zzAbCd",
+			"Kq9Lm2Pw7Xc4zzAbCd"}, // gitleaks:allow (synthetic)
+		{"md5-crypt hash in a CSV row", "admin,$1$abc12345$Qz7Kp2Lm9Xa8Bc7De6Fg5H,x", "Qz7Kp2Lm9Xa8"}, // gitleaks:allow (synthetic)
+		{"scheme tag in a sentence", "stored {SSHA}Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm in the row",
+			"Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm"}, // gitleaks:allow (synthetic)
 	}
 	for _, c := range cases {
 		assertHidden(t, c.name, c.in, c.body, d)
@@ -397,7 +413,8 @@ func TestAColonValueOutsideTheColonRulesIsHiddenAndRefused(t *testing.T) {
 		}
 	}
 	for _, in := range []string{"Then password: $DB_PASSWORD2 and continue", "see http://example.com:8080/a",
-		"Then token::Token2x here", "at 10:30 today", "token = cfg.api_key2", "password:cfg.api_key2"} { // gitleaks:allow (synthetic)
+		"Then token::Token2x here", "at 10:30 today", "token = conf.api_key2", "password:conf.api_key2",
+		"'password': conf.api_key2", `"password": getpass.getpass()`, "echo $HOME$PATH", "price is $5$ and $10$"} {
 		if out := Scrub(in, d, 4000); out != in {
 			t.Errorf("Scrub(%q) = %q, want it kept", in, out)
 		}

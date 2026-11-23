@@ -102,3 +102,15 @@ func schemeTagGlued(s string, k int) bool {
 func LDIFBase64Colon(s string, p int) bool {
 	return p+2 < len(s) && s[p] == ':' && s[p+1] == ':' && (s[p+2] == ' ' || s[p+2] == '\t')
 }
+
+// OwnNameAt reports whether the value at i is name itself, any case, alone: then blanks, and `,)]}`, a line break or
+// the text's end. That is a variable named for the key it fills (`{'token': token}`), not a value that opens with it
+// (`password-hunter2`, `password hunter2`).
+func OwnNameAt(s string, i int, name string) bool {
+	e := i + len(name)
+	if e > len(s) || !strings.EqualFold(s[i:e], name) {
+		return false
+	}
+	e = SkipBlanks(s, e)
+	return e == len(s) || strings.IndexByte(",)]}\r\n", s[e]) >= 0
+}

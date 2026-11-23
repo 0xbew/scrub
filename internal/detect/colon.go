@@ -195,6 +195,7 @@ func (c *Scan) colonAt(p int) {
 		if q > 0 && (s[q-1] == '"' || s[q-1] == '\'') {
 			c.jsonField(q, qe, p)
 			c.objectAfter(name, p)
+			c.quotedNameBareValue(name, q, qe, p)
 		}
 		return
 	}

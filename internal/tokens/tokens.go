@@ -240,6 +240,7 @@ func TokenSpans(s string, emit func(lo, hi int)) {
 			}
 		}
 	}
+	hashSpans(s, emit)
 }
 
 func HasToken(s string) bool {
