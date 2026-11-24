@@ -44,6 +44,7 @@ func (c *Scan) code() {
 		c.quotedNameArgument(runStart, e)
 		c.litRule = 0
 		c.colonArray(e)
+		c.colonLiterals(start, e)
 	}
 	c.envLines()
 	c.sql()
@@ -204,6 +205,15 @@ func (c *Scan) quotedNameArgument(start, e int) {
 		return
 	}
 	c.statementLiterals(lex.SkipBlanks(s, k+1), start)
+}
+
+// colonLiterals: every string literal in a credential's colon value, to the value's end, whatever the value opens
+// with (`{password: undefined ? x : "…"}`, `"token": str ?? "…"`): a guard that judged the value by its first word
+// sent the literal after it, and this hides only literals, so a value with none loses nothing.
+func (c *Scan) colonLiterals(start, e int) {
+	if v, end, ok := lex.ColonValue(c.S, start, e, StatementEnd); ok {
+		c.literalsTo(v, end, false)
+	}
 }
 
 // colonArray: `name: [a, b]`.

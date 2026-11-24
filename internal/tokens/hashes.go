@@ -18,7 +18,7 @@ const (
 	maxHashField   = 200 // one `$`-separated field before the last
 	maxHashFields  = 6
 	minHashLast    = 8
-	minTaggedValue = 4  // after a plain password's tag
+	minTaggedValue = 2  // after a plain password's tag: a password may be short (`{PLAIN}pw`)
 	minTaggedHash  = 12 // after a digest's or a crypt hash's: `{SHA}-linux` is a template's
 	maxSchemeName  = 13 // GOST_YESCRYPT
 )

@@ -21,26 +21,6 @@ func ColonStop(s string, i int) bool {
 	return false
 }
 
-var typeWords = []string{"str", "bytes", "int", "float", "bool", "None", "Any", "Optional", "Union", "SecretStr", "string",
-	"number", "boolean", "undefined"}
-
-// IsTypeWord reports whether a type annotation's word stands at i (`token: str`, `token: str|None`), not the
-// head of a value glued to it by other punctuation (`password: None-q7Xb2`).
-func IsTypeWord(s string, i int) bool {
-	for _, w := range typeWords {
-		n := i + len(w)
-		if len(s)-i >= len(w) && strings.EqualFold(s[i:n], w) && !lex.IsWordAt(s, n) &&
-			(!gluedToWord(s, n) || strings.IndexByte(typeJoiners, s[n]) >= 0) {
-			return true
-		}
-	}
-	return false
-}
-
-// typeJoiners: what joins a type word to the next in an annotation or ends it (`str|None`, `Dict<str,int>`, `int=0`,
-// `str.x`, `{token:string;user:string}`).
-const typeJoiners = "|&,=?<>.;"
-
 // IsBlockIndicator: a YAML block scalar's `|` or `>` ends the line (`key: |`).
 func IsBlockIndicator(s string, i int) bool {
 	j := i

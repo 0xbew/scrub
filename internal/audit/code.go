@@ -38,6 +38,7 @@ func (a *auditor) codeNameAt(i, e int) {
 	if !vocab.IsCredentialName(name) {
 		return
 	}
+	a.colonLiterals(i, e)
 	v := a.codeOpAfter(i, e)
 	if v < 0 {
 		a.getenvDefault(i, e)
@@ -50,6 +51,14 @@ func (a *auditor) codeNameAt(i, e int) {
 		return
 	}
 	a.codeValueAt(v)
+}
+
+// colonLiterals: a live literal in a credential's colon value, to the value's end, whatever the value opens with (the
+// scrubber's colonLiterals).
+func (a *auditor) colonLiterals(i, e int) {
+	if v, end, ok := lex.ColonValue(a.s, i, e, detect.StatementEnd); ok && a.literalLive(v, end) {
+		a.hit("secret:colon-value")
+	}
 }
 
 // codeOpAfter: where the value assigned to the name s[i:e] starts, -1 when no assignment

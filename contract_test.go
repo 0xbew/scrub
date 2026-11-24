@@ -405,6 +405,20 @@ func TestAColonValueOutsideTheColonRulesIsHiddenAndRefused(t *testing.T) {
 		{"md5-crypt hash in a CSV row", "admin,$1$abc12345$Qz7Kp2Lm9Xa8Bc7De6Fg5H,x", "Qz7Kp2Lm9Xa8"}, // gitleaks:allow (synthetic)
 		{"scheme tag in a sentence", "stored {SSHA}Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm in the row",
 			"Zm9vYmFyYmF6cXV4c2FsdA9Kp3Lm"}, // gitleaks:allow (synthetic)
+		// A plain password's short value behind its tag, and a type word followed by what no type syntax writes.
+		{"short plain value behind its tag", "stored {PLAIN}pw in the row", "{PLAIN}pw"},
+		{"type word, a member", "password: str.x9KqLm2Pw", "x9KqLm2Pw"}, // gitleaks:allow (synthetic)
+		{"type word, a union of a value", `{"password": string|hunter2pw, "user": "bob"}`, "hunter2pw"},
+		{"type word, arguments no type writes", "password: Optional[x9KqLm2Pw]", "x9KqLm2Pw"},
+		// A literal after a type word that goes on as code, after an unquoted, a quoted or a parenthesised name.
+		{"type word, a ternary", `{password: undefined ? fallback : "Kq9Lm2Pw7Xc"}`, "Kq9Lm2Pw7Xc"},        // gitleaks:allow (synthetic)
+		{"type word, an index", `{password: string[0] ?? "Kq9Lm2Pw7Xc"}`, "Kq9Lm2Pw7Xc"},                   // gitleaks:allow (synthetic)
+		{"type word, a union", `{password: undefined | "Kq9Lm2Pw7Xc"}`, "Kq9Lm2Pw7Xc"},                     // gitleaks:allow (synthetic)
+		{"type word, a member, ??", `{password: String.raw ?? "Kq9Lm2Pw7Xc"}`, "Kq9Lm2Pw7Xc"},              // gitleaks:allow (synthetic)
+		{"quoted name, type word, ??", `{"password": str ?? "Kq9Lm2Pw7Xc", "user": "bob"}`, "Kq9Lm2Pw7Xc"}, // gitleaks:allow (synthetic)
+		{"after `(`, type word, ??", `f(user, secret: None ?? "Kq9Lm2Pw7Xc")`, "Kq9Lm2Pw7Xc"},              // gitleaks:allow (synthetic)
+		// A triple quote whose body opens with its quote character.
+		{"triple quote, body opens with its quote", "{password: str or ````, a```` + \"Kq9Lm2Pw7Xc\"}", "Kq9Lm2Pw7Xc"}, // gitleaks:allow (synthetic)
 	}
 	for _, c := range cases {
 		assertHidden(t, c.name, c.in, c.body, d)
