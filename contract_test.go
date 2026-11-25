@@ -419,6 +419,19 @@ func TestAColonValueOutsideTheColonRulesIsHiddenAndRefused(t *testing.T) {
 		{"after `(`, type word, ??", `f(user, secret: None ?? "Kq9Lm2Pw7Xc")`, "Kq9Lm2Pw7Xc"},              // gitleaks:allow (synthetic)
 		// A triple quote whose body opens with its quote character.
 		{"triple quote, body opens with its quote", "{password: str or ````, a```` + \"Kq9Lm2Pw7Xc\"}", "Kq9Lm2Pw7Xc"}, // gitleaks:allow (synthetic)
+		// A run of backticks the value's end read as a triple quote and the audit one at a time.
+		{"four backticks, then a triple", "{password: str or ````, a``` + \"Kq9Lm2Pw7Xc\"}", "Kq9Lm2Pw7Xc"}, // gitleaks:allow (synthetic)
+		// A keyword argument (a call, a lambda, a word an operator follows): the named rule took its first word, sent the rest.
+		{"keyword argument, a call's default", `f(password=os.environ.get("PW", "Kq9Lm2Pw7Xc"))`, "Kq9Lm2Pw7Xc"},           // gitleaks:allow (synthetic)
+		{"keyword argument, the call on the next line", "f(token=\n    os.getenv(\"T\", \"Kq9Lm2Pw7Xc\"))", "Kq9Lm2Pw7Xc"}, // gitleaks:allow (synthetic)
+		{"keyword argument, a lambda", `f(token=lambda a, b: "Kq9Lm2Pw7Xc")`, "Kq9Lm2Pw7Xc"},                               // gitleaks:allow (synthetic)
+		{"keyword argument, a lambda's default", `f(token=lambda a=lambda: 0, b=1: 'Kq9Lm2Pw7Xc')`, "Kq9Lm2Pw7Xc"},         // gitleaks:allow (synthetic)
+		{"keyword argument, a fallback after a word", `f(user, password=pw or "Kq9Lm2Pw7Xc")`, "Kq9Lm2Pw7Xc"},              // gitleaks:allow (synthetic)
+		// A literal on the line after a lone word: the word was taken as the whole value.
+		{"a lone word, a literal on the next line", "password: foo\n\"Kq9Lm2Pw7Xc\"", "Kq9Lm2Pw7Xc"},                     // gitleaks:allow (synthetic)
+		{"quoted name, a literal on the next line", "{\"password\": foo\n \"Kq9Lm2Pw7Xc\"}", "Kq9Lm2Pw7Xc"},              // gitleaks:allow (synthetic)
+		{"a lone word, a prefixed literal on the next line", "password: foo\nf\"Kq9Lm2Pw7Xc\"", "Kq9Lm2Pw7Xc"},           // gitleaks:allow (synthetic)
+		{"a lone word, a literal after a form feed on the next line", "password: foo\n\f\"Kq9Lm2Pw7Xc\"", "Kq9Lm2Pw7Xc"}, // gitleaks:allow (synthetic)
 	}
 	for _, c := range cases {
 		assertHidden(t, c.name, c.in, c.body, d)

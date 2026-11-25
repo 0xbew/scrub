@@ -45,6 +45,7 @@ func (c *Scan) code() {
 		c.litRule = 0
 		c.colonArray(e)
 		c.colonLiterals(start, e)
+		c.keywordCallLiterals(start, e)
 	}
 	c.envLines()
 	c.sql()
@@ -212,6 +213,15 @@ func (c *Scan) quotedNameArgument(start, e int) {
 // sent the literal after it, and this hides only literals, so a value with none loses nothing.
 func (c *Scan) colonLiterals(start, e int) {
 	if v, end, ok := lex.ColonValue(c.S, start, e, StatementEnd); ok {
+		c.literalsTo(v, end, false)
+	}
+}
+
+// keywordCallLiterals: every string literal in a credential's keyword argument whose value is a call, an index or a
+// lambda, to the value's end (`f(password=os.environ.get("PW", "…"))`): the named rule takes the value's first word
+// and sent the default after it.
+func (c *Scan) keywordCallLiterals(start, e int) {
+	if v, end, ok := lex.KeywordCallValue(c.S, start, e, StatementEnd); ok {
 		c.literalsTo(v, end, false)
 	}
 }

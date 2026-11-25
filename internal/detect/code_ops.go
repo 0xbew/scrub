@@ -10,10 +10,7 @@ import (
 // `api_key: str = x`, `var apiKey string = x`), an argument after a credential's quoted name
 // (`getenv("API_KEY", "x")`), heredocs, YAML block scalars, SQL, Dockerfile ENV and setx.
 
-const (
-	maxStatementLines = 12
-	maxLiteralChars   = 4000
-)
+const maxStatementLines = 12
 
 // CodeOpAfter: a code assignment operator after a name ending at e. Returns where the
 // value starts (after the operator and a continuation), or -1. goType allows a type after

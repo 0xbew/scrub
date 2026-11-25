@@ -39,6 +39,7 @@ func (a *auditor) codeNameAt(i, e int) {
 		return
 	}
 	a.colonLiterals(i, e)
+	a.keywordCallLiterals(i, e)
 	v := a.codeOpAfter(i, e)
 	if v < 0 {
 		a.getenvDefault(i, e)
@@ -58,6 +59,14 @@ func (a *auditor) codeNameAt(i, e int) {
 func (a *auditor) colonLiterals(i, e int) {
 	if v, end, ok := lex.ColonValue(a.s, i, e, detect.StatementEnd); ok && a.literalLive(v, end) {
 		a.hit("secret:colon-value")
+	}
+}
+
+// keywordCallLiterals: a live literal in a credential's keyword argument whose value is a call, an index or a lambda,
+// to the value's end (the scrubber's keywordCallLiterals).
+func (a *auditor) keywordCallLiterals(i, e int) {
+	if v, end, ok := lex.KeywordCallValue(a.s, i, e, detect.StatementEnd); ok && a.literalLive(v, end) {
+		a.hit("secret:named-value")
 	}
 }
 
@@ -125,11 +134,12 @@ func (a *auditor) literalLive(i, end int) bool {
 		end = i + 4000
 	}
 	for i < end {
-		_, open, slashes, quote, ok := detect.LiteralOpen(s, i, end)
+		op, ok := lex.LiteralOpen(s, i, end)
 		if !ok {
 			return false
 		}
-		cl, closing := detect.LiteralEnd(s, open, slashes, quote, end)
+		open := op.Open
+		cl, closing := lex.LiteralEnd(s, open, op.Slashes, op.Quote, end)
 		if closing != "" {
 			body := s[open : cl-len(closing)]
 			if live(body) {

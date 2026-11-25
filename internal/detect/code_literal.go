@@ -332,76 +332,6 @@ func StatementEnd(s string, pos int) int {
 	return end
 }
 
-// LiteralOpen: the next literal opener in s[from:to]: its start, the end of its opening, the
-// backslashes before the quote and the quote.
-func LiteralOpen(s string, from, to int) (start, open int, slashes, quote string, ok bool) {
-	for i := from; i < to; i++ {
-		ch := s[i]
-		if ch != '"' && ch != '\'' && ch != '`' {
-			continue
-		}
-		q := string(ch)
-		if ch != '`' && i+2 < len(s) && s[i+1] == ch && s[i+2] == ch {
-			q = strings.Repeat(q, 3)
-		}
-		b := i
-		for b > from && s[b-1] == '\\' {
-			b--
-		}
-		st := b
-		for k := 0; k < 2 && st > from && strings.IndexByte("rRbBuUfFnNeE", s[st-1]) >= 0; k++ {
-			st--
-		}
-		return st, i + len(q), s[b:i], q, true
-	}
-	return 0, 0, "", "", false
-}
-
-// LiteralEnd: just past a literal's closing quote, and the closing, or the statement end.
-func LiteralEnd(s string, open int, slashes, quote string, end int) (int, string) {
-	far := end
-	if len(quote) == 3 || quote == "`" {
-		far = open + maxLiteralChars
-		if far > len(s) {
-			far = len(s)
-		}
-	}
-	if slashes != "" || len(quote) == 3 {
-		at := open
-		closing := slashes + quote
-		for at < far {
-			k := strings.Index(s[at:far], closing)
-			if k < 0 {
-				break
-			}
-			cl := at + k
-			if slashes == "" || cl == 0 || s[cl-1] != '\\' {
-				return cl + len(closing), closing
-			}
-			at = cl + 1
-		}
-		return end, ""
-	}
-	i := open
-	for i < far {
-		ch := s[i]
-		switch {
-		case ch == '\\':
-			i += 2
-		case string(ch) == quote:
-			return i + 1, quote
-		case ch == '\n' && quote != "`":
-			return i, ""
-		default:
-			i++
-		}
-	}
-	if i > end {
-		i = end
-	}
-	return i, ""
-}
-
 // statementLiterals: every string literal from pos to the statement's end loses its body.
 func (c *Scan) statementLiterals(pos, from int) {
 	c.literalsTo(pos, StatementEnd(c.S, from), false)
@@ -414,10 +344,11 @@ func (c *Scan) literalsTo(pos, end int, hard bool) {
 	enclosing := ""
 	prevEnd := -1
 	for pos < end {
-		st, open, slashes, quote, ok := LiteralOpen(s, pos, end)
+		op, ok := lex.LiteralOpen(s, pos, end)
 		if !ok {
 			return
 		}
+		st, open, slashes, quote := op.Start, op.Open, op.Slashes, op.Quote
 		var stop bool
 		if enclosing, stop = enclosingQuote(enclosing, slashes, quote); stop {
 			return
@@ -449,7 +380,7 @@ func enclosingQuote(enclosing, slashes, quote string) (string, bool) {
 // literalClose: where the literal opening at open closes and its closing quote ("" when unclosed); with hard,
 // a literal reading past end is cut there as unclosed.
 func (c *Scan) literalClose(open int, slashes, quote string, end int, hard bool) (int, string) {
-	cl, closing := LiteralEnd(c.S, open, slashes, quote, end)
+	cl, closing := lex.LiteralEnd(c.S, open, slashes, quote, end)
 	if hard && cl > end {
 		cl, closing = end, ""
 	}
