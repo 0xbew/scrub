@@ -304,10 +304,11 @@ func operatorLineAt(s string, i int) bool {
 	return false
 }
 
-// colonValueEnd: where the value starting at pos ends, at most at end (its statement's end): at the first `,` or `;`
-// outside brackets, literals and a lambda's parameters (`lambda a, b: "x"`), or at a bracket closing one opened
-// before pos, or a quote closing a string the value sits in. maxValueChars read outside literals without one, it is
-// end: a long literal is skipped whole and does not count.
+// colonValueEnd: where the value starting at pos ends, at most at end (its statement's end): at the first `,` outside
+// brackets, literals and a lambda's parameters (`lambda a, b: "x"`), or at a bracket closing one opened before pos,
+// or a quote closing a string the value sits in. A `;` does not end it: the literals after one are read to the
+// statement's end (`{"password": str;"…"}`), as an assignment's are. maxValueChars read outside literals without one,
+// it is end: a long literal is skipped whole and does not count.
 func colonValueEnd(s string, pos, end int) int {
 	depth, params, read, i := 0, 0, 0, pos
 	for ; i < end; read++ {
@@ -331,7 +332,7 @@ func colonValueEnd(s string, pos, end int) int {
 		case depth > 0:
 		case c == ':' && params > 0:
 			params--
-		case c == ',' && params == 0 || c == ';':
+		case c == ',' && params == 0:
 			return i
 		case c == 'l' && strings.HasPrefix(s[i:], "lambda") && !WordBefore(s, i) && !IsWordAt(s, i+len("lambda")):
 			params++

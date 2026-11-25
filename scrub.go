@@ -5,7 +5,7 @@ package scrub
 import "github.com/0xbew/scrub/internal/engine"
 
 // Version: bump when a rule changes what is removed or what the audit refuses.
-const Version = 4
+const Version = 5
 
 // RedactMargin: the rules run on a little more than is sent, so a secret or a name
 // straddling the cut is whole when they see it; the margin is never sent.

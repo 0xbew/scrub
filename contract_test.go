@@ -432,6 +432,9 @@ func TestAColonValueOutsideTheColonRulesIsHiddenAndRefused(t *testing.T) {
 		{"quoted name, a literal on the next line", "{\"password\": foo\n \"Kq9Lm2Pw7Xc\"}", "Kq9Lm2Pw7Xc"},              // gitleaks:allow (synthetic)
 		{"a lone word, a prefixed literal on the next line", "password: foo\nf\"Kq9Lm2Pw7Xc\"", "Kq9Lm2Pw7Xc"},           // gitleaks:allow (synthetic)
 		{"a lone word, a literal after a form feed on the next line", "password: foo\n\f\"Kq9Lm2Pw7Xc\"", "Kq9Lm2Pw7Xc"}, // gitleaks:allow (synthetic)
+		// A literal after a `;` in the value: the `;` ended it.
+		{"quoted name, a literal after a `;`", `{"password": str;"Kq9Lm2Pw7Xc"}`, "Kq9Lm2Pw7Xc"}, // gitleaks:allow (synthetic)
+		{"a word, a literal after a `;`", `{password: str;"Kq9Lm2Pw7Xc"}`, "Kq9Lm2Pw7Xc"},        // gitleaks:allow (synthetic)
 	}
 	for _, c := range cases {
 		assertHidden(t, c.name, c.in, c.body, d)
